@@ -1,0 +1,112 @@
+{
+    "id":  "rename",
+    "displayName":  "Rename",
+    "description":  "Preview and rename selected files or folders.",
+    "menuText":  "Rename...",
+    "targets":  [
+                    "file",
+                    "folder"
+                ],
+    "extensions":  [
+                       "*"
+                   ],
+    "script":  "run.ps1",
+    "enabledByDefault":  true,
+    "settings":  [
+                     {
+                         "key":  "base_name",
+                         "label":  "Base Name",
+                         "type":  "text",
+                         "default":  "",
+                         "hint":  "Leave empty to keep the current base name. If set, this replaces the current base name."
+                     },
+                     {
+                         "key":  "prefix",
+                         "label":  "Default Prefix",
+                         "type":  "combo",
+                         "default":  "",
+                         "options":  [
+                                         "{timestamp}",
+                                         "{parent_folder}"
+                                     ],
+                         "hint":  "Choose a token or type free text. Supported tokens: {timestamp}, {parent_folder}"
+                     },
+                     {
+                         "key":  "suffix",
+                         "label":  "Default Suffix",
+                         "type":  "combo",
+                         "default":  "{timestamp}",
+                         "options":  [
+                                         "{timestamp}",
+                                         "{parent_folder}"
+                                     ],
+                         "hint":  "Choose a token or type free text. Supported tokens: {timestamp}, {parent_folder}"
+                     },
+                     {
+                         "key":  "affix_separator",
+                         "label":  "Affix Separator",
+                         "type":  "choice",
+                         "default":  "_",
+                         "options":  [
+                                         "none",
+                                         "_",
+                                         "-"
+                                     ],
+                         "hint":  "Inserted between the base name and prefix/suffix text."
+                     },
+                     {
+                         "key":  "replace_from",
+                         "label":  "Replace From",
+                         "type":  "text",
+                         "default":  "",
+                         "hint":  "Leave empty to skip replacement."
+                     },
+                     {
+                         "key":  "replace_to",
+                         "label":  "Replace To",
+                         "type":  "text",
+                         "default":  "",
+                         "hint":  "Replacement text for matched substrings."
+                     },
+                     {
+                         "key":  "numbering_mode",
+                         "label":  "Numbering Mode",
+                         "type":  "choice",
+                         "default":  "none",
+                         "options":  [
+                                         "none",
+                                         "prefix",
+                                         "suffix"
+                                     ],
+                         "hint":  "Add a running number before or after the name."
+                     },
+                     {
+                         "key":  "number_start",
+                         "label":  "Number Start",
+                         "type":  "number",
+                         "default":  "1",
+                         "hint":  "First value used when numbering is enabled."
+                     },
+                     {
+                         "key":  "number_padding",
+                         "label":  "Number Padding",
+                         "type":  "number",
+                         "default":  "2",
+                         "hint":  "Zero padding width for the running number."
+                     },
+                     {
+                         "key":  "number_separator",
+                         "label":  "Number Separator",
+                         "type":  "text",
+                         "default":  "_",
+                         "hint":  "Inserted between the name and running number."
+                     },
+                     {
+                         "key":  "preserve_extension",
+                         "label":  "Preserve File Extension",
+                         "type":  "bool",
+                         "default":  "1",
+                         "hint":  "Keep the original extension untouched for files."
+                     }
+                 ]
+}

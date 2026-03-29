@@ -1,0 +1,40 @@
+﻿{
+  "id": "print",
+  "displayName": "Print",
+  "description": "Print PDF, Word, and Excel files with a timestamp header.",
+  "menuText": "Print",
+  "targets": ["file"],
+  "extensions": [".pdf", ".doc", ".docx", ".docm", ".dot", ".dotx", ".xls", ".xlsx", ".xlsm", ".xlsb", ".xlt", ".xltx", ".xltm"],
+  "script": "run.ps1",
+  "enabledByDefault": true,
+  "settings": [
+    {
+      "key": "header_format",
+      "label": "Header Format",
+      "type": "text",
+      "default": "Printed {timestamp} | {filename}",
+      "hint": "Supported tokens: {timestamp}, {filename}, {name}"
+    },
+    {
+      "key": "fit_excel_width",
+      "label": "Fit Excel To One Page Wide",
+      "type": "bool",
+      "default": "1",
+      "hint": "Shrink wide sheets horizontally to reduce clipping."
+    },
+    {
+      "key": "visible_sheets_only",
+      "label": "Visible Sheets Only",
+      "type": "bool",
+      "default": "1",
+      "hint": "Skip hidden worksheets when printing Excel files."
+    },
+    {
+      "key": "auto_landscape",
+      "label": "Auto Landscape For Wide Sheets",
+      "type": "bool",
+      "default": "0",
+      "hint": "Switch wide Excel sheets to landscape automatically."
+    }
+  ]
+}
