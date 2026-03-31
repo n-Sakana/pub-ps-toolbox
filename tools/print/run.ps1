@@ -19,6 +19,158 @@ $script:LogPath = Join-Path $PSScriptRoot 'print.log'
 $script:Config = @{}
 $script:AcrobatSaveFull = 0x01
 $script:AcrobatSaveCollectGarbage = 0x20
+$script:OriginalDevMode = $null
+$script:OriginalPrinterName = $null
+
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class DuplexHelper
+{
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct PRINTER_DEFAULTS
+    {
+        public IntPtr pDatatype;
+        public IntPtr pDevMode;
+        public int DesiredAccess;
+    }
+
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool OpenPrinter(string pPrinterName, out IntPtr phPrinter, ref PRINTER_DEFAULTS pDefault);
+
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool OpenPrinter(string pPrinterName, out IntPtr phPrinter, IntPtr pDefault);
+
+    [DllImport("winspool.drv", SetLastError = true)]
+    static extern bool ClosePrinter(IntPtr hPrinter);
+
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern int DocumentProperties(
+        IntPtr hWnd, IntPtr hPrinter, string pDeviceName,
+        IntPtr pDevModeOutput, IntPtr pDevModeInput, int fMode);
+
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool SetPrinter(IntPtr hPrinter, int Level, IntPtr pPrinter, int Command);
+
+    const int DM_OUT_BUFFER = 2;
+    const int DM_IN_BUFFER  = 8;
+    const int DM_FIELDS_OFFSET = 72;
+    const int DM_DUPLEX_OFFSET = 94;
+    const int DM_DUPLEX_FLAG   = 0x1000;
+    const int PRINTER_ACCESS_ADMINISTER = 0x04;
+    const int PRINTER_ACCESS_USE        = 0x08;
+
+    static IntPtr OpenWithAccess(string printerName)
+    {
+        IntPtr hPrinter;
+        var defaults = new PRINTER_DEFAULTS
+        {
+            pDatatype = IntPtr.Zero,
+            pDevMode  = IntPtr.Zero,
+            DesiredAccess = PRINTER_ACCESS_ADMINISTER
+        };
+        if (OpenPrinter(printerName, out hPrinter, ref defaults))
+            return hPrinter;
+
+        defaults.DesiredAccess = PRINTER_ACCESS_USE;
+        if (OpenPrinter(printerName, out hPrinter, ref defaults))
+            return hPrinter;
+
+        throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
+
+    public static byte[] GetDevMode(string printerName)
+    {
+        IntPtr hPrinter;
+        if (!OpenPrinter(printerName, out hPrinter, IntPtr.Zero))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        try
+        {
+            int size = DocumentProperties(IntPtr.Zero, hPrinter, printerName,
+                           IntPtr.Zero, IntPtr.Zero, 0);
+            if (size <= 0)
+                throw new Exception("DocumentProperties size query failed.");
+            IntPtr pDev = Marshal.AllocHGlobal(size);
+            try
+            {
+                if (DocumentProperties(IntPtr.Zero, hPrinter, printerName,
+                        pDev, IntPtr.Zero, DM_OUT_BUFFER) < 0)
+                    throw new Exception("DocumentProperties get failed.");
+                byte[] buf = new byte[size];
+                Marshal.Copy(pDev, buf, 0, size);
+                return buf;
+            }
+            finally { Marshal.FreeHGlobal(pDev); }
+        }
+        finally { ClosePrinter(hPrinter); }
+    }
+
+    public static short GetDuplex(byte[] devMode)
+    {
+        return BitConverter.ToInt16(devMode, DM_DUPLEX_OFFSET);
+    }
+
+    static void MergeAndSetDevMode(IntPtr hPrinter, string printerName, byte[] devMode)
+    {
+        int size = DocumentProperties(IntPtr.Zero, hPrinter, printerName,
+                       IntPtr.Zero, IntPtr.Zero, 0);
+        if (size <= 0)
+            throw new Exception("DocumentProperties size query failed.");
+
+        IntPtr pIn = Marshal.AllocHGlobal(devMode.Length);
+        try
+        {
+            Marshal.Copy(devMode, 0, pIn, devMode.Length);
+            IntPtr pOut = Marshal.AllocHGlobal(size);
+            try
+            {
+                if (DocumentProperties(IntPtr.Zero, hPrinter, printerName,
+                        pOut, pIn, DM_IN_BUFFER | DM_OUT_BUFFER) < 0)
+                    throw new Exception("DocumentProperties merge failed.");
+
+                IntPtr pInfo9 = Marshal.AllocHGlobal(IntPtr.Size);
+                try
+                {
+                    Marshal.WriteIntPtr(pInfo9, pOut);
+                    if (!SetPrinter(hPrinter, 9, pInfo9, 0))
+                        throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+                finally { Marshal.FreeHGlobal(pInfo9); }
+            }
+            finally { Marshal.FreeHGlobal(pOut); }
+        }
+        finally { Marshal.FreeHGlobal(pIn); }
+    }
+
+    public static void ApplyDuplex(string printerName, byte[] devMode, short duplex)
+    {
+        byte[] modified = (byte[])devMode.Clone();
+        int fields = BitConverter.ToInt32(modified, DM_FIELDS_OFFSET);
+        fields |= DM_DUPLEX_FLAG;
+        Array.Copy(BitConverter.GetBytes(fields), 0, modified, DM_FIELDS_OFFSET, 4);
+        Array.Copy(BitConverter.GetBytes(duplex),  0, modified, DM_DUPLEX_OFFSET, 2);
+
+        IntPtr hPrinter = OpenWithAccess(printerName);
+        try
+        {
+            MergeAndSetDevMode(hPrinter, printerName, modified);
+        }
+        finally { ClosePrinter(hPrinter); }
+    }
+
+    public static void RestoreDevMode(string printerName, byte[] originalDevMode)
+    {
+        IntPtr hPrinter = OpenWithAccess(printerName);
+        try
+        {
+            MergeAndSetDevMode(hPrinter, printerName, originalDevMode);
+        }
+        finally { ClosePrinter(hPrinter); }
+    }
+}
+'@
 
 function Load-ConfigMap {
     param([string]$Path)
@@ -115,7 +267,7 @@ function Set-WordHeaders {
                 $header = $section.Headers.Item($headerType)
                 $range = $header.Range
                 $range.Text = $StampText
-                $range.ParagraphFormat.Alignment = 1
+                $range.ParagraphFormat.Alignment = 2
                 $range.Font.Size = 8
                 $range.Font.Name = 'Meiryo'
             } catch {
@@ -175,11 +327,11 @@ function Invoke-ExcelPrint {
             try {
                 if ($visibleSheetsOnly -and $sheet.Visible -ne -1) { continue }
                 $pageSetup = $sheet.PageSetup
-                $pageSetup.CenterHeader = $headerText
+                $pageSetup.RightHeader = $headerText
                 if ($fitExcelWidth) {
                     $pageSetup.Zoom = $false
                     $pageSetup.FitToPagesWide = 1
-                    $pageSetup.FitToPagesTall = $false
+                    $pageSetup.FitToPagesTall = 32767
                 }
                 if ($autoLandscape) {
                     $usedRange = $sheet.UsedRange
@@ -287,9 +439,9 @@ function Invoke-PdfPrint {
             $false,
             $true,
             2,
-            3,
+            0,
             -36,
-            -18,
+            18,
             $false,
             1.0,
             $true,
@@ -329,6 +481,46 @@ function Invoke-PdfPrint {
     }
 }
 
+function Get-DuplexValue {
+    $setting = Get-ToolSetting -Name 'duplex' -Default 'default'
+    switch ($setting) {
+        'simplex'    { return [short]1 }
+        'long_edge'  { return [short]2 }
+        'short_edge' { return [short]3 }
+        default      { return [short]0 }
+    }
+}
+
+function Set-PrinterDuplex {
+    $duplex = Get-DuplexValue
+    if ($duplex -eq 0) { return }
+
+    try {
+        $printerName = (New-Object System.Drawing.Printing.PrinterSettings).PrinterName
+        $script:OriginalDevMode = [DuplexHelper]::GetDevMode($printerName)
+        $script:OriginalPrinterName = $printerName
+        [DuplexHelper]::ApplyDuplex($printerName, $script:OriginalDevMode, $duplex)
+        Write-Log "Duplex set to $duplex on $printerName"
+    } catch {
+        Write-Log "Duplex override failed: $($_.Exception.Message)"
+        $script:OriginalDevMode = $null
+        $script:OriginalPrinterName = $null
+    }
+}
+
+function Restore-PrinterDuplex {
+    if ($null -eq $script:OriginalDevMode) { return }
+
+    try {
+        [DuplexHelper]::RestoreDevMode($script:OriginalPrinterName, $script:OriginalDevMode)
+        Write-Log "Duplex restored on $script:OriginalPrinterName"
+    } catch {
+        Write-Log "Duplex restore failed: $($_.Exception.Message)"
+    }
+    $script:OriginalDevMode = $null
+    $script:OriginalPrinterName = $null
+}
+
 function Invoke-PrintFile {
     param([string]$Path)
 
@@ -363,21 +555,26 @@ if ($targets.Count -eq 0) {
     exit 0
 }
 
-$printed = 0
-$errors = New-Object System.Collections.Generic.List[string]
-foreach ($path in $targets) {
-    try {
-        Invoke-PrintFile -Path $path
-        $printed++
-    } catch {
-        $errors.Add($_.Exception.Message)
-        Write-Log $_.Exception.Message
+Set-PrinterDuplex
+try {
+    $printed = 0
+    $errors = New-Object System.Collections.Generic.List[string]
+    foreach ($path in $targets) {
+        try {
+            Invoke-PrintFile -Path $path
+            $printed++
+        } catch {
+            $errors.Add($_.Exception.Message)
+            Write-Log $_.Exception.Message
+        }
     }
+} finally {
+    Restore-PrinterDuplex
 }
 
 if ($errors.Count -gt 0) {
     [System.Windows.Forms.MessageBox]::Show(
-        ('Printed {0} file(s), {1} failed.`nLog: {2}' -f $printed, $errors.Count, $script:LogPath),
+        ("Printed {0} file(s), {1} failed.`nLog: {2}" -f $printed, $errors.Count, $script:LogPath),
         'Print',
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Warning

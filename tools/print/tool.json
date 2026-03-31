@@ -35,6 +35,14 @@
       "type": "bool",
       "default": "0",
       "hint": "Switch wide Excel sheets to landscape automatically."
+    },
+    {
+      "key": "duplex",
+      "label": "Duplex",
+      "type": "choice",
+      "default": "default",
+      "options": ["default", "simplex", "long_edge", "short_edge"],
+      "hint": "default=Printer setting / simplex=One-sided / long_edge=Two-sided (long) / short_edge=Two-sided (short)"
     }
   ]
 }
