@@ -564,6 +564,22 @@ function Invoke-PdfPrint {
 
         try { $acroApp.Hide() | Out-Null } catch {}
 
+        # Save to flatten incremental update, then reopen for printing
+        $pdDoc = $avDoc.GetPDDoc()
+        $saveFlags = $script:AcrobatSaveFull -bor $script:AcrobatSaveCollectGarbage
+        $pdDoc.Save($saveFlags, $tempPath) | Out-Null
+        $avDoc.Close(1) | Out-Null
+        Release-ComObject -ComObject $pdDoc
+        Release-ComObject -ComObject $avDoc
+        $pdDoc = $null
+        $avDoc = $null
+
+        $avDoc = New-Object -ComObject AcroExch.AVDoc
+        if (-not $avDoc.Open($tempPath, 'ps-toolbox')) {
+            throw 'Acrobat could not reopen the flattened PDF.'
+        }
+        try { $acroApp.Hide() | Out-Null } catch {}
+
         $pdDoc = $avDoc.GetPDDoc()
         $pageCount = [int]$pdDoc.GetNumPages()
 
