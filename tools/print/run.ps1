@@ -484,10 +484,10 @@ function Invoke-PdfPrint {
 function Get-DuplexValue {
     $setting = Get-ToolSetting -Name 'duplex' -Default 'default'
     switch ($setting) {
-        'simplex'    { return [short]1 }
-        'long_edge'  { return [short]2 }
-        'short_edge' { return [short]3 }
-        default      { return [short]0 }
+        'simplex'    { return [int16]1 }
+        'long_edge'  { return [int16]2 }
+        'short_edge' { return [int16]3 }
+        default      { return [int16]0 }
     }
 }
 
