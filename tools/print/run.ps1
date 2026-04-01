@@ -375,6 +375,7 @@ function Add-PdfStamp {
 
     $latin1 = [System.Text.Encoding]::GetEncoding(28591)
     $raw = [IO.File]::ReadAllText($PdfPath, $latin1)
+    $LF = "`n"
 
     # Parse startxref
     $sxMatch = [regex]::Match($raw, 'startxref\s+(\d+)\s+%%EOF\s*$')
@@ -398,14 +399,10 @@ function Add-PdfStamp {
 
     # Find page objects using bracket-balanced parsing
     $pageInfos = @()
-    $objStarts = [regex]::Matches($raw, '(\d+)\s+0\s+obj\s*<<')
-    foreach ($om in $objStarts) {
+    foreach ($om in [regex]::Matches($raw, '(\d+)\s+0\s+obj\s*<<')) {
         $objNum = [int]$om.Groups[1].Value
         $dictStart = $om.Index + $om.Length - 2
-
-        # Balance << >> to find full dictionary
-        $depth = 0; $pos = $dictStart
-        $dictEnd = -1
+        $depth = 0; $pos = $dictStart; $dictEnd = -1
         while ($pos -lt $raw.Length - 1) {
             if ($raw[$pos] -eq '<' -and $raw[$pos + 1] -eq '<') { $depth++; $pos += 2 }
             elseif ($raw[$pos] -eq '>' -and $raw[$pos + 1] -eq '>') {
@@ -415,7 +412,6 @@ function Add-PdfStamp {
             } else { $pos++ }
         }
         if ($dictEnd -eq -1) { continue }
-
         $fullDict = $raw.Substring($dictStart, $dictEnd - $dictStart)
         if ($fullDict -match '/Type\s*/Page\b' -and $fullDict -notmatch '/Type\s*/Pages\b') {
             $w = 595.28; $h = 841.89
@@ -429,22 +425,25 @@ function Add-PdfStamp {
     }
     if ($pageInfos.Count -eq 0) { return $false }
 
-    # Build incremental update
-    $fileBytes = [IO.File]::ReadAllBytes($PdfPath)
-    $baseOffset = $fileBytes.Length
-    $sb = [System.Text.StringBuilder]::new()
-    [void]$sb.AppendLine()
+    # Build incremental update using byte array for precise offsets
+    $ms = New-Object System.IO.MemoryStream
+    $baseOffset = (Get-Item -LiteralPath $PdfPath).Length
+
+    # Helper: write string, return nothing
+    $writeStr = { param([string]$s) $b = $latin1.GetBytes($s); $ms.Write($b, 0, $b.Length) }
+    # Helper: current offset from file start
+    $getOffset = { [long]$baseOffset + $ms.Position }
+
     $xrefKeys = @()
     $xrefOffsets = @{}
 
-    # Font resource object (shared across all pages)
+    & $writeStr $LF
+
+    # Font resource (shared)
     $fontObj = $nextObj++
-    $fontKey = [string]$fontObj
-    $xrefKeys += $fontKey
-    $xrefOffsets[$fontKey] = $baseOffset + $latin1.GetByteCount($sb.ToString())
-    [void]$sb.AppendLine("$fontObj 0 obj")
-    [void]$sb.AppendLine("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
-    [void]$sb.AppendLine("endobj")
+    $xrefKeys += [string]$fontObj
+    $xrefOffsets[[string]$fontObj] = (& $getOffset)
+    & $writeStr "$fontObj 0 obj$LF<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>$LF endobj$LF"
 
     foreach ($pi in $pageInfos) {
         $annotObj = $nextObj++
@@ -453,68 +452,55 @@ function Add-PdfStamp {
         $rx2 = $pi.Width - 18; $rx1 = $rx2 - $bw
         $ry2 = $pi.Height - 10; $ry1 = $ry2 - $bh
 
-        # Appearance stream content (right-aligned: estimate text width)
+        # Stream content
         $estWidth = $StampText.Length * 4.5
-        $tx = [Math]::Max(0, $bw - $estWidth - 2)
-        $apStream = "BT /Helv 9 Tf 0 g $([int]$tx) 2 Td ($escaped) Tj ET"
+        $tx = [Math]::Max(0, [int]($bw - $estWidth - 2))
+        $apStream = "BT /Helv 9 Tf 0 g $tx 2 Td ($escaped) Tj ET"
         $apLen = $latin1.GetByteCount($apStream)
 
         # Appearance XObject
-        $apKey = [string]$apObj
-        $xrefKeys += $apKey
-        $xrefOffsets[$apKey] = $baseOffset + $latin1.GetByteCount($sb.ToString())
-        [void]$sb.AppendLine("$apObj 0 obj")
-        [void]$sb.AppendLine("<< /Type /XObject /Subtype /Form /BBox [0 0 $bw $bh]")
-        [void]$sb.AppendLine("   /Resources << /Font << /Helv $fontObj 0 R >> >>")
-        [void]$sb.AppendLine("   /Length $apLen >>")
-        [void]$sb.AppendLine("stream")
-        [void]$sb.AppendLine($apStream)
-        [void]$sb.AppendLine("endstream")
-        [void]$sb.AppendLine("endobj")
+        $xrefKeys += [string]$apObj
+        $xrefOffsets[[string]$apObj] = (& $getOffset)
+        & $writeStr ("$apObj 0 obj$LF<< /Type /XObject /Subtype /Form /BBox [0 0 $bw $bh]$LF")
+        & $writeStr ("   /Resources << /Font << /Helv $fontObj 0 R >> >> /Length $apLen >>$LF")
+        & $writeStr "stream$LF"
+        & $writeStr $apStream
+        & $writeStr "${LF}endstream${LF}endobj$LF"
 
-        # Annotation object with /AP
-        $annotKey = [string]$annotObj
-        $xrefKeys += $annotKey
-        $xrefOffsets[$annotKey] = $baseOffset + $latin1.GetByteCount($sb.ToString())
-        [void]$sb.AppendLine("$annotObj 0 obj")
-        [void]$sb.AppendLine("<< /Type /Annot /Subtype /FreeText /F 4 /Q 2")
-        [void]$sb.AppendLine(("   /Rect [{0:F2} {1:F2} {2:F2} {3:F2}]" -f $rx1, $ry1, $rx2, $ry2))
-        [void]$sb.AppendLine("   /Contents ($escaped)")
-        [void]$sb.AppendLine("   /DA (/Helv 9 Tf 0 g) /Border [0 0 0]")
-        [void]$sb.AppendLine("   /AP << /N $apObj 0 R >>")
-        [void]$sb.AppendLine(">>")
-        [void]$sb.AppendLine("endobj")
+        # Annotation
+        $rect = "{0:F2} {1:F2} {2:F2} {3:F2}" -f $rx1, $ry1, $rx2, $ry2
+        $xrefKeys += [string]$annotObj
+        $xrefOffsets[[string]$annotObj] = (& $getOffset)
+        & $writeStr "$annotObj 0 obj$LF"
+        & $writeStr "<< /Type /Annot /Subtype /FreeText /F 4 /Q 2$LF"
+        & $writeStr "   /Rect [$rect]$LF"
+        & $writeStr "   /Contents ($escaped)$LF"
+        & $writeStr "   /DA (/Helv 9 Tf 0 g) /Border [0 0 0]$LF"
+        & $writeStr "   /AP << /N $apObj 0 R >>$LF>>$LF endobj$LF"
 
-        # Insert /Annots into original full dict
+        # Updated page
         $newDict = $pi.FullDict.Insert(2, " /Annots [$annotObj 0 R]")
-
-        $pageKey = [string]$pi.ObjNum
-        $xrefKeys += $pageKey
-        $xrefOffsets[$pageKey] = $baseOffset + $latin1.GetByteCount($sb.ToString())
-        [void]$sb.AppendLine("$($pi.ObjNum) 0 obj")
-        [void]$sb.AppendLine($newDict)
-        [void]$sb.AppendLine("endobj")
+        $xrefKeys += [string]$pi.ObjNum
+        $xrefOffsets[[string]$pi.ObjNum] = (& $getOffset)
+        & $writeStr "$($pi.ObjNum) 0 obj$LF$newDict${LF}endobj$LF"
     }
 
-    # Write xref
-    $xrefOffset = $baseOffset + $latin1.GetByteCount($sb.ToString())
-    [void]$sb.AppendLine("xref")
+    # Xref table
+    $xrefOffset = (& $getOffset)
+    & $writeStr "xref$LF"
     $sortedKeys = $xrefKeys | Sort-Object { [int]$_ }
     foreach ($k in $sortedKeys) {
-        [void]$sb.AppendLine("$k 1")
-        [void]$sb.Append(("{0:D10} 00000 n`r`n" -f $xrefOffsets[$k]))
+        & $writeStr "$k 1$LF"
+        & $writeStr ("{0:D10} 00000 n {1}" -f $xrefOffsets[$k], $LF)
     }
 
-    # Write trailer
-    [void]$sb.AppendLine("trailer")
-    [void]$sb.AppendLine("<< /Size $nextObj /Prev $prevStartXref /Root $rootObjRef >>")
-    [void]$sb.AppendLine("startxref")
-    [void]$sb.AppendLine("$xrefOffset")
-    [void]$sb.Append("%%EOF")
+    & $writeStr "trailer$LF<< /Size $nextObj /Prev $prevStartXref /Root $rootObjRef >>$LF"
+    & $writeStr "startxref${LF}${xrefOffset}${LF}%%EOF"
 
-    $appendBytes = $latin1.GetBytes($sb.ToString())
-    $stream = [IO.File]::Open($PdfPath, [IO.FileMode]::Append)
-    try { $stream.Write($appendBytes, 0, $appendBytes.Length) } finally { $stream.Close() }
+    $appendBytes = $ms.ToArray()
+    $ms.Dispose()
+    $fs = [IO.File]::Open($PdfPath, [IO.FileMode]::Append)
+    try { $fs.Write($appendBytes, 0, $appendBytes.Length) } finally { $fs.Close() }
     return $true
 }
 
