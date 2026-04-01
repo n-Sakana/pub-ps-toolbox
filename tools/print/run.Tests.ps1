@@ -78,12 +78,12 @@ Describe 'PDF watermark parameters' {
     }
 
     It 'nVertAlign is valid (0, 1, or 2)' {
-        [int]($wmArgs[11].Trim()) | Should BeLessThan 3
-        [int]($wmArgs[11].Trim()) | Should Not BeLessThan 0
+        [int]($wmArgs[12].Trim()) | Should BeLessThan 3
+        [int]($wmArgs[12].Trim()) | Should Not BeLessThan 0
     }
 
     It 'nVertAlign is 0 (top) for header positioning' {
-        [int]($wmArgs[11].Trim()) | Should Be 0
+        [int]($wmArgs[12].Trim()) | Should Be 0
     }
 
     It 'nVertValue is positive (below top edge)' {

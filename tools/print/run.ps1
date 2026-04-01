@@ -440,7 +440,7 @@ function Invoke-PdfPrint {
             $true,
             2,
             0,
-            -36,
+            0,
             18,
             $false,
             1.0,
