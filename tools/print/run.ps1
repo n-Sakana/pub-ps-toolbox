@@ -169,6 +169,20 @@ public static class DuplexHelper
         }
         finally { ClosePrinter(hPrinter); }
     }
+
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool WinSetDefaultPrinter(string printerName);
+
+    public static void SetDefaultPrinter(string printerName)
+    {
+        if (!WinSetDefaultPrinter(printerName))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
+
+    public static string GetDefaultPrinter()
+    {
+        return new System.Drawing.Printing.PrinterSettings().PrinterName;
+    }
 }
 '@
 
@@ -455,15 +469,12 @@ function Invoke-PdfPrint {
             throw 'Acrobat could not save the stamped temporary PDF.'
         }
 
-        $printerName = (New-Object System.Drawing.Printing.PrinterSettings).PrinterName
-        $pp = $jsDoc.getPrintParams()
-        $pp.interactive = 2
-        $pp.printerName = $printerName
-        $pp.firstPage = 0
-        $pp.lastPage = $pageCount - 1
-        $pp.pageHandling = 2
-        $pp.psLevel = 2
-        $jsDoc.print($pp)
+        $defaultPrinter = [DuplexHelper]::GetDefaultPrinter()
+        [DuplexHelper]::SetDefaultPrinter($defaultPrinter)
+        $printOk = $avDoc.PrintPagesSilent(0, ($pageCount - 1), 2, 0, 1)
+        if ($printOk -ne -1) {
+            throw 'Acrobat silent print failed.'
+        }
 
         Write-Log "Printed via Acrobat: $Path"
     } catch {
