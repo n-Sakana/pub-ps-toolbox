@@ -437,30 +437,60 @@ function Add-PdfStamp {
     $xrefKeys = @()
     $xrefOffsets = @{}
 
+    # Font resource object (shared across all pages)
+    $fontObj = $nextObj++
+    $fontKey = [string]$fontObj
+    $xrefKeys += $fontKey
+    $xrefOffsets[$fontKey] = $baseOffset + $latin1.GetByteCount($sb.ToString())
+    [void]$sb.AppendLine("$fontObj 0 obj")
+    [void]$sb.AppendLine("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    [void]$sb.AppendLine("endobj")
+
     foreach ($pi in $pageInfos) {
         $annotObj = $nextObj++
-        $rx2 = $pi.Width - 18; $rx1 = $rx2 - 300
-        $ry2 = $pi.Height - 10; $ry1 = $ry2 - 14
+        $apObj = $nextObj++
+        $bw = 300; $bh = 14
+        $rx2 = $pi.Width - 18; $rx1 = $rx2 - $bw
+        $ry2 = $pi.Height - 10; $ry1 = $ry2 - $bh
 
-        $key = [string]$annotObj
-        $xrefKeys += $key
-        $xrefOffsets[$key] = $baseOffset + $latin1.GetByteCount($sb.ToString())
+        # Appearance stream content (right-aligned: estimate text width)
+        $estWidth = $StampText.Length * 4.5
+        $tx = [Math]::Max(0, $bw - $estWidth - 2)
+        $apStream = "BT /Helv 9 Tf 0 g $([int]$tx) 2 Td ($escaped) Tj ET"
+        $apLen = $latin1.GetByteCount($apStream)
 
+        # Appearance XObject
+        $apKey = [string]$apObj
+        $xrefKeys += $apKey
+        $xrefOffsets[$apKey] = $baseOffset + $latin1.GetByteCount($sb.ToString())
+        [void]$sb.AppendLine("$apObj 0 obj")
+        [void]$sb.AppendLine("<< /Type /XObject /Subtype /Form /BBox [0 0 $bw $bh]")
+        [void]$sb.AppendLine("   /Resources << /Font << /Helv $fontObj 0 R >> >>")
+        [void]$sb.AppendLine("   /Length $apLen >>")
+        [void]$sb.AppendLine("stream")
+        [void]$sb.AppendLine($apStream)
+        [void]$sb.AppendLine("endstream")
+        [void]$sb.AppendLine("endobj")
+
+        # Annotation object with /AP
+        $annotKey = [string]$annotObj
+        $xrefKeys += $annotKey
+        $xrefOffsets[$annotKey] = $baseOffset + $latin1.GetByteCount($sb.ToString())
         [void]$sb.AppendLine("$annotObj 0 obj")
         [void]$sb.AppendLine("<< /Type /Annot /Subtype /FreeText /F 4 /Q 2")
         [void]$sb.AppendLine(("   /Rect [{0:F2} {1:F2} {2:F2} {3:F2}]" -f $rx1, $ry1, $rx2, $ry2))
         [void]$sb.AppendLine("   /Contents ($escaped)")
         [void]$sb.AppendLine("   /DA (/Helv 9 Tf 0 g) /Border [0 0 0]")
+        [void]$sb.AppendLine("   /AP << /N $apObj 0 R >>")
         [void]$sb.AppendLine(">>")
         [void]$sb.AppendLine("endobj")
 
-        # Insert /Annots into original full dict (including nested <<>>)
+        # Insert /Annots into original full dict
         $newDict = $pi.FullDict.Insert(2, " /Annots [$annotObj 0 R]")
 
         $pageKey = [string]$pi.ObjNum
         $xrefKeys += $pageKey
         $xrefOffsets[$pageKey] = $baseOffset + $latin1.GetByteCount($sb.ToString())
-
         [void]$sb.AppendLine("$($pi.ObjNum) 0 obj")
         [void]$sb.AppendLine($newDict)
         [void]$sb.AppendLine("endobj")
