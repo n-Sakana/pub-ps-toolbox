@@ -355,22 +355,9 @@ function Invoke-ExcelPrint {
         }
         try { $excel.PrintCommunication = $true } catch {}
 
-        $printedSheetCount = 0
-        foreach ($sheet in @($wb.Worksheets)) {
-            try {
-                if ($visibleSheetsOnly -and $sheet.Visible -ne -1) { continue }
-                $sheet.PrintOut()
-                $printedSheetCount++
-            } catch {
-                Write-Log "Excel sheet print skipped: $Path / $($_.Exception.Message)"
-            }
-        }
+        $wb.PrintOut()
 
-        if ($printedSheetCount -eq 0) {
-            throw 'No printable worksheet found.'
-        }
-
-        Write-Log "Printed via Excel: $Path (sheets=$printedSheetCount)"
+        Write-Log "Printed via Excel: $Path"
     } catch {
         throw "Excel print failed: $Path`n$($_.Exception.Message)"
     } finally {
