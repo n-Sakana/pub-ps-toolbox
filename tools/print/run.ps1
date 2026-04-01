@@ -535,10 +535,16 @@ function Invoke-PdfPrint {
             $stamped = Add-PdfStamp -PdfPath $tempPath -StampText $stampText
             if (-not $stamped) {
                 Write-Log "PDF stamp skipped (unsupported structure): $Path"
+            } else {
+                Write-Log "PDF stamp applied: $tempPath (size=$((Get-Item -LiteralPath $tempPath).Length))"
             }
         } catch {
             Write-Log "PDF stamp failed: $($_.Exception.Message)"
         }
+
+        # Debug: save stamped copy for inspection
+        $debugPath = Join-Path $PSScriptRoot 'debug_stamped.pdf'
+        try { Copy-Item -LiteralPath $tempPath -Destination $debugPath -Force } catch {}
 
         try {
             $acroApp = New-Object -ComObject AcroExch.App
