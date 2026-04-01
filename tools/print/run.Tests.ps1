@@ -33,20 +33,20 @@ Describe 'Get-StampText' {
 }
 
 Describe 'Get-ExcelHeaderText' {
-    It 'prefixes with &8 for small font' {
+    It 'prefixes with &9 for small font' {
         $result = Get-ExcelHeaderText -StampText 'Hello'
-        $result | Should Be '&8 Hello'
+        $result | Should Be '&9 Hello'
     }
 
     It 'escapes ampersands' {
         $result = Get-ExcelHeaderText -StampText 'A&B'
-        $result | Should Be '&8 A&&B'
+        $result | Should Be '&9 A&&B'
     }
 
     It 'truncates long text to 220 chars' {
         $long = 'x' * 300
         $result = Get-ExcelHeaderText -StampText $long
-        # &8 + space + 220 chars = 223
+        # &9 + space + 220 chars = 223
         $result.Length | Should Be 223
     }
 }

@@ -261,7 +261,7 @@ function Get-ExcelHeaderText {
     if ($safe.Length -gt 220) {
         $safe = $safe.Substring(0, 220)
     }
-    return '&8 ' + $safe
+    return '&9 ' + $safe
 }
 
 function Set-WordHeaders {
@@ -277,7 +277,7 @@ function Set-WordHeaders {
                 $range = $header.Range
                 $range.Text = $StampText
                 $range.ParagraphFormat.Alignment = 2
-                $range.Font.Size = 8
+                $range.Font.Size = 9
                 $range.Font.Name = 'Meiryo'
             } catch {
                 Write-Log "Word header update skipped: $($_.Exception.Message)"
@@ -440,7 +440,7 @@ function Invoke-PdfPrint {
             $stampText,
             2,
             'Helv',
-            8,
+            9,
             $colorBlack,
             0,
             ($pageCount - 1),
