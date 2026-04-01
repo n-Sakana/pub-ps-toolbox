@@ -425,27 +425,33 @@ function Invoke-PdfPrint {
         }
 
         try {
-            $colorBlack = $jsDoc.color.black
-            $null = $jsDoc.addWatermarkFromText(
+            $watermarkArgs = @(
                 $stampText,
-                2,
+                [int]2,
                 'Helv',
-                9,
-                $colorBlack,
-                0,
-                ($pageCount - 1),
-                $true,
-                $false,
-                $true,
-                2,
-                0,
-                0,
-                18,
-                $false,
-                1.0,
-                $true,
-                0,
-                1.0
+                [int]9,
+                @('RGB', 0, 0, 0),
+                [int]0,
+                [int]($pageCount - 1),
+                [bool]$true,
+                [bool]$false,
+                [bool]$true,
+                [int]2,
+                [int]0,
+                [int]0,
+                [int]18,
+                [bool]$false,
+                [double]1.0,
+                [bool]$true,
+                [int]0,
+                [double]1.0
+            )
+            $jsDoc.GetType().InvokeMember(
+                'addWatermarkFromText',
+                [System.Reflection.BindingFlags]::InvokeMethod,
+                $null,
+                $jsDoc,
+                $watermarkArgs
             )
 
             $saveFlags = $script:AcrobatSaveFull -bor $script:AcrobatSaveCollectGarbage
