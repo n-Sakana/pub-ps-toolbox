@@ -170,12 +170,12 @@ public static class DuplexHelper
         finally { ClosePrinter(hPrinter); }
     }
 
-    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
-    static extern bool WinSetDefaultPrinter(string printerName);
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "SetDefaultPrinterW")]
+    static extern bool NativeSetDefaultPrinter(string printerName);
 
     public static void SetDefaultPrinter(string printerName)
     {
-        if (!WinSetDefaultPrinter(printerName))
+        if (!NativeSetDefaultPrinter(printerName))
             throw new Win32Exception(Marshal.GetLastWin32Error());
     }
 }
