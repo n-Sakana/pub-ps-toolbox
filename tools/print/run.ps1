@@ -420,66 +420,81 @@ function Add-PdfStamp {
                 $w = [double]$mbMatch.Groups[3].Value
                 $h = [double]$mbMatch.Groups[4].Value
             }
-            $pageInfos += @{ ObjNum = $objNum; FullDict = $fullDict; Width = $w; Height = $h }
+            # Find existing /Contents reference
+            $contRef = ''
+            $contMatch = [regex]::Match($fullDict, '/Contents\s+(\d+\s+\d+\s+R)')
+            $contArrayMatch = [regex]::Match($fullDict, '/Contents\s*\[([^\]]+)\]')
+            if ($contMatch.Success) { $contRef = $contMatch.Groups[1].Value }
+            elseif ($contArrayMatch.Success) { $contRef = $contArrayMatch.Groups[1].Value.Trim() }
+            $pageInfos += @{ ObjNum = $objNum; FullDict = $fullDict; Width = $w; Height = $h; ContRef = $contRef }
         }
     }
     if ($pageInfos.Count -eq 0) { return $false }
 
-    # Build incremental update using byte array for precise offsets
+    # Build incremental update
     $ms = New-Object System.IO.MemoryStream
     $baseOffset = (Get-Item -LiteralPath $PdfPath).Length
-
-    # Helper: write string, return nothing
     $writeStr = { param([string]$s) $b = $latin1.GetBytes($s); $ms.Write($b, 0, $b.Length) }
-    # Helper: current offset from file start
     $getOffset = { [long]$baseOffset + $ms.Position }
-
     $xrefKeys = @()
     $xrefOffsets = @{}
 
     & $writeStr $LF
 
-    # Font resource (shared)
+    # Shared font object (Helvetica)
     $fontObj = $nextObj++
     $xrefKeys += [string]$fontObj
     $xrefOffsets[[string]$fontObj] = (& $getOffset)
     & $writeStr "$fontObj 0 obj$LF<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>$LF endobj$LF"
 
     foreach ($pi in $pageInfos) {
-        $annotObj = $nextObj++
-        $apObj = $nextObj++
-        $bw = 300; $bh = 14
-        $rx2 = $pi.Width - 18; $rx1 = $rx2 - $bw
-        $ry2 = $pi.Height - 10; $ry1 = $ry2 - $bh
+        $formObj = $nextObj++
+        $overlayObj = $nextObj++
 
-        # Stream content
+        # Text position: right-aligned near top of page
         $estWidth = $StampText.Length * 4.5
-        $tx = [Math]::Max(0, [int]($bw - $estWidth - 2))
-        $apStream = "BT /Helv 9 Tf 0 g $tx 2 Td ($escaped) Tj ET"
-        $apLen = $latin1.GetByteCount($apStream)
+        $tx = [int][Math]::Max(0, $pi.Width - 18 - $estWidth)
+        $ty = [int]($pi.Height - 20)
 
-        # Appearance XObject
-        $xrefKeys += [string]$apObj
-        $xrefOffsets[[string]$apObj] = (& $getOffset)
-        & $writeStr ("$apObj 0 obj$LF<< /Type /XObject /Subtype /Form /BBox [0 0 $bw $bh]$LF")
-        & $writeStr ("   /Resources << /Font << /Helv $fontObj 0 R >> >> /Length $apLen >>$LF")
+        # Form XObject with stamp text (carries its own font resource)
+        $formStream = "BT /Helv 9 Tf 0 g $tx $ty Td ($escaped) Tj ET"
+        $formLen = $latin1.GetByteCount($formStream)
+        $xrefKeys += [string]$formObj
+        $xrefOffsets[[string]$formObj] = (& $getOffset)
+        & $writeStr "$formObj 0 obj$LF"
+        & $writeStr "<< /Type /XObject /Subtype /Form /BBox [0 0 $([int]$pi.Width) $([int]$pi.Height)]$LF"
+        & $writeStr "   /Resources << /Font << /Helv $fontObj 0 R >> >> /Length $formLen >>$LF"
         & $writeStr "stream$LF"
-        & $writeStr $apStream
+        & $writeStr $formStream
         & $writeStr "${LF}endstream${LF}endobj$LF"
 
-        # Annotation
-        $rect = "{0:F2} {1:F2} {2:F2} {3:F2}" -f $rx1, $ry1, $rx2, $ry2
-        $xrefKeys += [string]$annotObj
-        $xrefOffsets[[string]$annotObj] = (& $getOffset)
-        & $writeStr "$annotObj 0 obj$LF"
-        & $writeStr "<< /Type /Annot /Subtype /FreeText /F 4 /Q 2$LF"
-        & $writeStr "   /Rect [$rect]$LF"
-        & $writeStr "   /Contents ($escaped)$LF"
-        & $writeStr "   /DA (/Helv 9 Tf 0 g) /Border [0 0 0]$LF"
-        & $writeStr "   /AP << /N $apObj 0 R >>$LF>>$LF endobj$LF"
+        # Overlay content stream: invoke the form XObject
+        $overlayStream = "q /PsStamp Do Q"
+        $overlayLen = $latin1.GetByteCount($overlayStream)
+        $xrefKeys += [string]$overlayObj
+        $xrefOffsets[[string]$overlayObj] = (& $getOffset)
+        & $writeStr "$overlayObj 0 obj$LF<< /Length $overlayLen >>$LF"
+        & $writeStr "stream$LF"
+        & $writeStr $overlayStream
+        & $writeStr "${LF}endstream${LF}endobj$LF"
 
-        # Updated page
-        $newDict = $pi.FullDict.Insert(2, " /Annots [$annotObj 0 R]")
+        # Rewrite page: add overlay to /Contents, add XObject to /Resources
+        $newDict = $pi.FullDict
+
+        # Update /Contents to array including overlay
+        if ($pi.ContRef -ne '') {
+            $newDict = [regex]::Replace($newDict, '/Contents\s+\d+\s+\d+\s+R', "/Contents [$($pi.ContRef) $overlayObj 0 R]")
+            $newDict = [regex]::Replace($newDict, '/Contents\s*\[[^\]]+\]', "/Contents [$($pi.ContRef) $overlayObj 0 R]")
+        }
+
+        # Add /XObject to /Resources
+        $xoEntry = "/XObject << /PsStamp $formObj 0 R >>"
+        if ($newDict -match '/Resources\s*<<') {
+            $resPos = [regex]::Match($newDict, '/Resources\s*<<')
+            $insertAt = $resPos.Index + $resPos.Length
+            $newDict = $newDict.Insert($insertAt, " $xoEntry")
+        }
+
         $xrefKeys += [string]$pi.ObjNum
         $xrefOffsets[[string]$pi.ObjNum] = (& $getOffset)
         & $writeStr "$($pi.ObjNum) 0 obj$LF$newDict${LF}endobj$LF"
@@ -488,12 +503,10 @@ function Add-PdfStamp {
     # Xref table
     $xrefOffset = (& $getOffset)
     & $writeStr "xref$LF"
-    $sortedKeys = $xrefKeys | Sort-Object { [int]$_ }
-    foreach ($k in $sortedKeys) {
+    foreach ($k in ($xrefKeys | Sort-Object { [int]$_ })) {
         & $writeStr "$k 1$LF"
         & $writeStr ("{0:D10} 00000 n {1}" -f $xrefOffsets[$k], $LF)
     }
-
     & $writeStr "trailer$LF<< /Size $nextObj /Prev $prevStartXref /Root $rootObjRef >>$LF"
     & $writeStr "startxref${LF}${xrefOffset}${LF}%%EOF"
 
