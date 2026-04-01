@@ -370,13 +370,131 @@ function Invoke-ExcelPrint {
     }
 }
 
+function Add-PdfStamp {
+    param([string]$PdfPath, [string]$StampText)
+
+    $latin1 = [System.Text.Encoding]::GetEncoding(28591)
+    $raw = [IO.File]::ReadAllText($PdfPath, $latin1)
+
+    $sxMatch = [regex]::Match($raw, 'startxref\s+(\d+)\s+%%EOF\s*$')
+    if (-not $sxMatch.Success) { return $false }
+    $prevStartXref = [long]$sxMatch.Groups[1].Value
+
+    $trailerMatch = [regex]::Match($raw, '(?s)trailer\s*<<(.*?)>>\s*startxref\s+\d+\s+%%EOF\s*$')
+    if (-not $trailerMatch.Success) { return $false }
+    $trailer = $trailerMatch.Groups[1].Value
+
+    $sizeMatch = [regex]::Match($trailer, '/Size\s+(\d+)')
+    if (-not $sizeMatch.Success) { return $false }
+    $nextObj = [int]$sizeMatch.Groups[1].Value
+
+    $rootMatch = [regex]::Match($trailer, '/Root\s+(\d+)\s+\d+\s+R')
+    if (-not $rootMatch.Success) { return $false }
+    $rootRef = $rootMatch.Value.Trim()
+
+    $escaped = $StampText.Replace('\', '\\').Replace('(', '\(').Replace(')', '\)')
+
+    $pageInfos = @()
+    $objPattern = '(?s)(\d+)\s+0\s+obj\s*<<((?:[^>]|>(?!>))*)>>'
+    foreach ($om in [regex]::Matches($raw, $objPattern)) {
+        $dict = $om.Groups[2].Value
+        if ($dict -match '/Type\s*/Page\b' -and $dict -notmatch '/Type\s*/Pages\b') {
+            $w = 595.28; $h = 841.89
+            $mbMatch = [regex]::Match($dict, '/MediaBox\s*\[\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)')
+            if ($mbMatch.Success) {
+                $w = [double]$mbMatch.Groups[3].Value
+                $h = [double]$mbMatch.Groups[4].Value
+            }
+            $existAnnots = ''
+            $annotsInline = [regex]::Match($dict, '/Annots\s*\[([^\]]*)\]')
+            $annotsRef = [regex]::Match($dict, '/Annots\s+(\d+)\s+\d+\s+R')
+            if ($annotsInline.Success) {
+                $existAnnots = $annotsInline.Groups[1].Value.Trim()
+            } elseif ($annotsRef.Success) {
+                $existAnnots = $annotsRef.Value.Replace('/Annots ', '').Trim()
+            }
+            $pageInfos += @{
+                ObjNum = [int]$om.Groups[1].Value
+                Dict = $dict
+                Width = $w; Height = $h
+                ExistAnnots = $existAnnots
+                HasInlineAnnots = $annotsInline.Success
+                HasRefAnnots = $annotsRef.Success
+            }
+        }
+    }
+    if ($pageInfos.Count -eq 0) { return $false }
+
+    $fileBytes = [IO.File]::ReadAllBytes($PdfPath)
+    $baseOffset = $fileBytes.Length
+    $sb = [System.Text.StringBuilder]::new()
+    $xrefEntries = [ordered]@{}
+
+    foreach ($pi in $pageInfos) {
+        $annotObj = $nextObj++
+        $rx2 = $pi.Width - 18
+        $rx1 = $rx2 - 300
+        $ry2 = $pi.Height - 10
+        $ry1 = $ry2 - 14
+
+        $xrefEntries[$annotObj] = $baseOffset + $latin1.GetByteCount($sb.ToString())
+        $sb.AppendLine("$annotObj 0 obj") | Out-Null
+        $sb.AppendLine("<< /Type /Annot /Subtype /FreeText /F 4 /Q 2") | Out-Null
+        $sb.AppendLine(("   /Rect [{0:F2} {1:F2} {2:F2} {3:F2}]" -f $rx1, $ry1, $rx2, $ry2)) | Out-Null
+        $sb.AppendLine("   /Contents ($escaped)") | Out-Null
+        $sb.AppendLine("   /DA (/Helv 9 Tf 0 g) /Border [0 0 0]") | Out-Null
+        $sb.AppendLine(">>") | Out-Null
+        $sb.AppendLine("endobj") | Out-Null
+
+        $annotRef = "$annotObj 0 R"
+        if ($pi.HasInlineAnnots) {
+            $newAnnots = "$($pi.ExistAnnots) $annotRef"
+        } elseif ($pi.HasRefAnnots) {
+            $newAnnots = "$($pi.ExistAnnots) $annotRef"
+        } else {
+            $newAnnots = $annotRef
+        }
+
+        $newDict = $pi.Dict
+        if ($pi.HasInlineAnnots) {
+            $newDict = [regex]::Replace($newDict, '/Annots\s*\[[^\]]*\]', "/Annots [$newAnnots]")
+        } elseif ($pi.HasRefAnnots) {
+            $newDict = [regex]::Replace($newDict, '/Annots\s+\d+\s+\d+\s+R', "/Annots [$newAnnots]")
+        } else {
+            $newDict = "/Annots [$newAnnots] " + $newDict
+        }
+
+        $pageObjNum = $pi.ObjNum
+        $xrefEntries[$pageObjNum] = $baseOffset + $latin1.GetByteCount($sb.ToString())
+        $sb.AppendLine("$pageObjNum 0 obj") | Out-Null
+        $sb.AppendLine("<<$newDict>>") | Out-Null
+        $sb.AppendLine("endobj") | Out-Null
+    }
+
+    $xrefOffset = $baseOffset + $latin1.GetByteCount($sb.ToString())
+    $sb.AppendLine("xref") | Out-Null
+    foreach ($entry in $xrefEntries.GetEnumerator()) {
+        $sb.AppendLine("$($entry.Key) 1") | Out-Null
+        $sb.AppendLine(("{0:D10} 00000 n " -f $entry.Value)) | Out-Null
+    }
+    $sb.AppendLine("trailer") | Out-Null
+    $sb.AppendLine("<< /Size $nextObj /Prev $prevStartXref /$rootRef >>".Replace('/$rootRef', "/Root $rootRef")) | Out-Null
+    $sb.AppendLine("startxref") | Out-Null
+    $sb.AppendLine("$xrefOffset") | Out-Null
+    $sb.Append("%%EOF") | Out-Null
+
+    $appendBytes = $latin1.GetBytes($sb.ToString())
+    $stream = [IO.File]::Open($PdfPath, [IO.FileMode]::Append)
+    try { $stream.Write($appendBytes, 0, $appendBytes.Length) } finally { $stream.Close() }
+    return $true
+}
+
 function Invoke-PdfPrint {
     param([string]$Path)
 
     $acroApp = $null
     $avDoc = $null
     $pdDoc = $null
-    $jsDoc = $null
     $tempDir = Join-Path ([IO.Path]::GetTempPath()) ('pstoolbox_' + [guid]::NewGuid().ToString('N'))
     [IO.Directory]::CreateDirectory($tempDir) | Out-Null
     $tempPath = Join-Path $tempDir ([IO.Path]::GetFileName($Path))
@@ -384,6 +502,15 @@ function Invoke-PdfPrint {
 
     try {
         Copy-Item -LiteralPath $Path -Destination $tempPath -Force
+
+        try {
+            $stamped = Add-PdfStamp -PdfPath $tempPath -StampText $stampText
+            if (-not $stamped) {
+                Write-Log "PDF stamp skipped (unsupported structure): $Path"
+            }
+        } catch {
+            Write-Log "PDF stamp failed: $($_.Exception.Message)"
+        }
 
         try {
             $acroApp = New-Object -ComObject AcroExch.App
@@ -410,58 +537,7 @@ function Invoke-PdfPrint {
         try { $acroApp.Hide() | Out-Null } catch {}
 
         $pdDoc = $avDoc.GetPDDoc()
-        if ($null -eq $pdDoc) {
-            throw 'Acrobat PDDoc was not available.'
-        }
-
-        $jsDoc = $pdDoc.GetJSObject()
-        if ($null -eq $jsDoc) {
-            throw 'Acrobat JavaScript object was not available.'
-        }
-
         $pageCount = [int]$pdDoc.GetNumPages()
-        if ($pageCount -le 0) {
-            throw 'PDF has no printable pages.'
-        }
-
-        try {
-            $watermarkArgs = @(
-                $stampText,
-                [int]2,
-                'Helv',
-                [int]9,
-                @('RGB', 0, 0, 0),
-                [int]0,
-                [int]($pageCount - 1),
-                [bool]$true,
-                [bool]$false,
-                [bool]$true,
-                [int]2,
-                [int]0,
-                [int]0,
-                [int]18,
-                [bool]$false,
-                [double]1.0,
-                [bool]$true,
-                [int]0,
-                [double]1.0
-            )
-            $jsDoc.GetType().InvokeMember(
-                'addWatermarkFromText',
-                [System.Reflection.BindingFlags]::InvokeMethod,
-                $null,
-                $jsDoc,
-                $watermarkArgs
-            )
-
-            $saveFlags = $script:AcrobatSaveFull -bor $script:AcrobatSaveCollectGarbage
-            $saveOk = $pdDoc.Save($saveFlags, $tempPath)
-            if ($saveOk -ne -1) {
-                Write-Log "PDF watermark save failed, printing without header: $Path"
-            }
-        } catch {
-            Write-Log "PDF watermark skipped: $($_.Exception.Message)"
-        }
 
         $defaultPrinter = (New-Object System.Drawing.Printing.PrinterSettings).PrinterName
         [DuplexHelper]::SetDefaultPrinter($defaultPrinter)
@@ -479,7 +555,6 @@ function Invoke-PdfPrint {
             try { $acroApp.Hide() | Out-Null } catch {}
             try { $acroApp.Exit() | Out-Null } catch {}
         }
-        Release-ComObject -ComObject $jsDoc
         Release-ComObject -ComObject $pdDoc
         Release-ComObject -ComObject $avDoc
         Release-ComObject -ComObject $acroApp
