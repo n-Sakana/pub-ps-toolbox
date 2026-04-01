@@ -376,10 +376,12 @@ function Add-PdfStamp {
     $latin1 = [System.Text.Encoding]::GetEncoding(28591)
     $raw = [IO.File]::ReadAllText($PdfPath, $latin1)
 
+    # Parse startxref
     $sxMatch = [regex]::Match($raw, 'startxref\s+(\d+)\s+%%EOF\s*$')
     if (-not $sxMatch.Success) { return $false }
     $prevStartXref = [long]$sxMatch.Groups[1].Value
 
+    # Parse trailer
     $trailerMatch = [regex]::Match($raw, '(?s)trailer\s*<<(.*?)>>\s*startxref\s+\d+\s+%%EOF\s*$')
     if (-not $trailerMatch.Success) { return $false }
     $trailer = $trailerMatch.Groups[1].Value
@@ -388,100 +390,97 @@ function Add-PdfStamp {
     if (-not $sizeMatch.Success) { return $false }
     $nextObj = [int]$sizeMatch.Groups[1].Value
 
-    $rootMatch = [regex]::Match($trailer, '/Root\s+(\d+)\s+\d+\s+R')
+    $rootMatch = [regex]::Match($trailer, '/Root\s+(\d+\s+\d+\s+R)')
     if (-not $rootMatch.Success) { return $false }
-    $rootRef = $rootMatch.Value.Trim()
+    $rootObjRef = $rootMatch.Groups[1].Value
 
     $escaped = $StampText.Replace('\', '\\').Replace('(', '\(').Replace(')', '\)')
 
+    # Find page objects using bracket-balanced parsing
     $pageInfos = @()
-    $objPattern = '(?s)(\d+)\s+0\s+obj\s*<<((?:[^>]|>(?!>))*)>>'
-    foreach ($om in [regex]::Matches($raw, $objPattern)) {
-        $dict = $om.Groups[2].Value
-        if ($dict -match '/Type\s*/Page\b' -and $dict -notmatch '/Type\s*/Pages\b') {
+    $objStarts = [regex]::Matches($raw, '(\d+)\s+0\s+obj\s*<<')
+    foreach ($om in $objStarts) {
+        $objNum = [int]$om.Groups[1].Value
+        $dictStart = $om.Index + $om.Length - 2
+
+        # Balance << >> to find full dictionary
+        $depth = 0; $pos = $dictStart
+        $dictEnd = -1
+        while ($pos -lt $raw.Length - 1) {
+            if ($raw[$pos] -eq '<' -and $raw[$pos + 1] -eq '<') { $depth++; $pos += 2 }
+            elseif ($raw[$pos] -eq '>' -and $raw[$pos + 1] -eq '>') {
+                $depth--
+                if ($depth -eq 0) { $dictEnd = $pos + 2; break }
+                $pos += 2
+            } else { $pos++ }
+        }
+        if ($dictEnd -eq -1) { continue }
+
+        $fullDict = $raw.Substring($dictStart, $dictEnd - $dictStart)
+        if ($fullDict -match '/Type\s*/Page\b' -and $fullDict -notmatch '/Type\s*/Pages\b') {
             $w = 595.28; $h = 841.89
-            $mbMatch = [regex]::Match($dict, '/MediaBox\s*\[\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)')
+            $mbMatch = [regex]::Match($fullDict, '/MediaBox\s*\[\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)')
             if ($mbMatch.Success) {
                 $w = [double]$mbMatch.Groups[3].Value
                 $h = [double]$mbMatch.Groups[4].Value
             }
-            $existAnnots = ''
-            $annotsInline = [regex]::Match($dict, '/Annots\s*\[([^\]]*)\]')
-            $annotsRef = [regex]::Match($dict, '/Annots\s+(\d+)\s+\d+\s+R')
-            if ($annotsInline.Success) {
-                $existAnnots = $annotsInline.Groups[1].Value.Trim()
-            } elseif ($annotsRef.Success) {
-                $existAnnots = $annotsRef.Value.Replace('/Annots ', '').Trim()
-            }
-            $pageInfos += @{
-                ObjNum = [int]$om.Groups[1].Value
-                Dict = $dict
-                Width = $w; Height = $h
-                ExistAnnots = $existAnnots
-                HasInlineAnnots = $annotsInline.Success
-                HasRefAnnots = $annotsRef.Success
-            }
+            $pageInfos += @{ ObjNum = $objNum; FullDict = $fullDict; Width = $w; Height = $h }
         }
     }
     if ($pageInfos.Count -eq 0) { return $false }
 
+    # Build incremental update
     $fileBytes = [IO.File]::ReadAllBytes($PdfPath)
     $baseOffset = $fileBytes.Length
     $sb = [System.Text.StringBuilder]::new()
-    $xrefEntries = [ordered]@{}
+    [void]$sb.AppendLine()
+    $xrefKeys = @()
+    $xrefOffsets = @{}
 
     foreach ($pi in $pageInfos) {
         $annotObj = $nextObj++
-        $rx2 = $pi.Width - 18
-        $rx1 = $rx2 - 300
-        $ry2 = $pi.Height - 10
-        $ry1 = $ry2 - 14
+        $rx2 = $pi.Width - 18; $rx1 = $rx2 - 300
+        $ry2 = $pi.Height - 10; $ry1 = $ry2 - 14
 
-        $xrefEntries[$annotObj] = $baseOffset + $latin1.GetByteCount($sb.ToString())
-        $sb.AppendLine("$annotObj 0 obj") | Out-Null
-        $sb.AppendLine("<< /Type /Annot /Subtype /FreeText /F 4 /Q 2") | Out-Null
-        $sb.AppendLine(("   /Rect [{0:F2} {1:F2} {2:F2} {3:F2}]" -f $rx1, $ry1, $rx2, $ry2)) | Out-Null
-        $sb.AppendLine("   /Contents ($escaped)") | Out-Null
-        $sb.AppendLine("   /DA (/Helv 9 Tf 0 g) /Border [0 0 0]") | Out-Null
-        $sb.AppendLine(">>") | Out-Null
-        $sb.AppendLine("endobj") | Out-Null
+        $key = [string]$annotObj
+        $xrefKeys += $key
+        $xrefOffsets[$key] = $baseOffset + $latin1.GetByteCount($sb.ToString())
 
-        $annotRef = "$annotObj 0 R"
-        if ($pi.HasInlineAnnots) {
-            $newAnnots = "$($pi.ExistAnnots) $annotRef"
-        } elseif ($pi.HasRefAnnots) {
-            $newAnnots = "$($pi.ExistAnnots) $annotRef"
-        } else {
-            $newAnnots = $annotRef
-        }
+        [void]$sb.AppendLine("$annotObj 0 obj")
+        [void]$sb.AppendLine("<< /Type /Annot /Subtype /FreeText /F 4 /Q 2")
+        [void]$sb.AppendLine(("   /Rect [{0:F2} {1:F2} {2:F2} {3:F2}]" -f $rx1, $ry1, $rx2, $ry2))
+        [void]$sb.AppendLine("   /Contents ($escaped)")
+        [void]$sb.AppendLine("   /DA (/Helv 9 Tf 0 g) /Border [0 0 0]")
+        [void]$sb.AppendLine(">>")
+        [void]$sb.AppendLine("endobj")
 
-        $newDict = $pi.Dict
-        if ($pi.HasInlineAnnots) {
-            $newDict = [regex]::Replace($newDict, '/Annots\s*\[[^\]]*\]', "/Annots [$newAnnots]")
-        } elseif ($pi.HasRefAnnots) {
-            $newDict = [regex]::Replace($newDict, '/Annots\s+\d+\s+\d+\s+R', "/Annots [$newAnnots]")
-        } else {
-            $newDict = "/Annots [$newAnnots] " + $newDict
-        }
+        # Insert /Annots into original full dict (including nested <<>>)
+        $newDict = $pi.FullDict.Insert(2, " /Annots [$annotObj 0 R]")
 
-        $pageObjNum = $pi.ObjNum
-        $xrefEntries[$pageObjNum] = $baseOffset + $latin1.GetByteCount($sb.ToString())
-        $sb.AppendLine("$pageObjNum 0 obj") | Out-Null
-        $sb.AppendLine("<<$newDict>>") | Out-Null
-        $sb.AppendLine("endobj") | Out-Null
+        $pageKey = [string]$pi.ObjNum
+        $xrefKeys += $pageKey
+        $xrefOffsets[$pageKey] = $baseOffset + $latin1.GetByteCount($sb.ToString())
+
+        [void]$sb.AppendLine("$($pi.ObjNum) 0 obj")
+        [void]$sb.AppendLine($newDict)
+        [void]$sb.AppendLine("endobj")
     }
 
+    # Write xref
     $xrefOffset = $baseOffset + $latin1.GetByteCount($sb.ToString())
-    $sb.AppendLine("xref") | Out-Null
-    foreach ($entry in $xrefEntries.GetEnumerator()) {
-        $sb.AppendLine("$($entry.Key) 1") | Out-Null
-        $sb.AppendLine(("{0:D10} 00000 n " -f $entry.Value)) | Out-Null
+    [void]$sb.AppendLine("xref")
+    $sortedKeys = $xrefKeys | Sort-Object { [int]$_ }
+    foreach ($k in $sortedKeys) {
+        [void]$sb.AppendLine("$k 1")
+        [void]$sb.Append(("{0:D10} 00000 n`r`n" -f $xrefOffsets[$k]))
     }
-    $sb.AppendLine("trailer") | Out-Null
-    $sb.AppendLine("<< /Size $nextObj /Prev $prevStartXref /$rootRef >>".Replace('/$rootRef', "/Root $rootRef")) | Out-Null
-    $sb.AppendLine("startxref") | Out-Null
-    $sb.AppendLine("$xrefOffset") | Out-Null
-    $sb.Append("%%EOF") | Out-Null
+
+    # Write trailer
+    [void]$sb.AppendLine("trailer")
+    [void]$sb.AppendLine("<< /Size $nextObj /Prev $prevStartXref /Root $rootObjRef >>")
+    [void]$sb.AppendLine("startxref")
+    [void]$sb.AppendLine("$xrefOffset")
+    [void]$sb.Append("%%EOF")
 
     $appendBytes = $latin1.GetBytes($sb.ToString())
     $stream = [IO.File]::Open($PdfPath, [IO.FileMode]::Append)
