@@ -1,0 +1,56 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]
+   /Annots [6 0 R]
+   /Contents 4 0 R
+   /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 41 >>
+stream
+BT /F1 24 Tf 100 700 Td (Hello PDF) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+6 0 obj
+<< /Type /Annot /Subtype /FreeText /F 4 /Q 2
+   /Rect [200 820 577 838]
+   /Contents (Test Header - FreeText Annotation)
+   /DA (/Helv 12 Tf 0 g)
+   /Border [0 0 0]
+   /AP << /N 7 0 R >> >>
+endobj
+7 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 377 18]
+   /Resources << /Font << /Helv 8 0 R >> >>
+   /Length 67 >>
+stream
+BT /Helv 12 Tf 0 g 0 4 Td (Test Header - FreeText Annotation) Tj ET
+endstream
+endobj
+8 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobjxref
+0 9
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000266 00000 n 
+0000000357 00000 n 
+0000000427 00000 n 
+0000000632 00000 n 
+0000000845 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+914
+%%EOF
