@@ -178,11 +178,6 @@ public static class DuplexHelper
         if (!WinSetDefaultPrinter(printerName))
             throw new Win32Exception(Marshal.GetLastWin32Error());
     }
-
-    public static string GetDefaultPrinter()
-    {
-        return new System.Drawing.Printing.PrinterSettings().PrinterName;
-    }
 }
 '@
 
@@ -469,7 +464,7 @@ function Invoke-PdfPrint {
             throw 'Acrobat could not save the stamped temporary PDF.'
         }
 
-        $defaultPrinter = [DuplexHelper]::GetDefaultPrinter()
+        $defaultPrinter = (New-Object System.Drawing.Printing.PrinterSettings).PrinterName
         [DuplexHelper]::SetDefaultPrinter($defaultPrinter)
         $printOk = $avDoc.PrintPagesSilent(0, ($pageCount - 1), 2, 0, 1)
         if ($printOk -ne -1) {
