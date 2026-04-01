@@ -377,7 +377,9 @@ function Invoke-PdfPrint {
     $avDoc = $null
     $pdDoc = $null
     $jsDoc = $null
-    $tempPath = Join-Path ([IO.Path]::GetTempPath()) ('pstoolbox_pdf_' + [guid]::NewGuid().ToString('N') + '.pdf')
+    $tempDir = Join-Path ([IO.Path]::GetTempPath()) ('pstoolbox_' + [guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($tempDir) | Out-Null
+    $tempPath = Join-Path $tempDir ([IO.Path]::GetFileName($Path))
     $stampText = Get-StampText -Path $Path
 
     try {
@@ -423,7 +425,7 @@ function Invoke-PdfPrint {
         }
 
         try {
-            $colorBlack = $jsDoc.newArray('RGB', 0, 0, 0)
+            $colorBlack = $jsDoc.color.black
             $null = $jsDoc.addWatermarkFromText(
                 $stampText,
                 2,
@@ -475,8 +477,8 @@ function Invoke-PdfPrint {
         Release-ComObject -ComObject $pdDoc
         Release-ComObject -ComObject $avDoc
         Release-ComObject -ComObject $acroApp
-        if (Test-Path -LiteralPath $tempPath) {
-            try { Remove-Item -LiteralPath $tempPath -Force } catch {}
+        if (Test-Path -LiteralPath $tempDir) {
+            try { Remove-Item -LiteralPath $tempDir -Recurse -Force } catch {}
         }
         [GC]::Collect()
         [GC]::WaitForPendingFinalizers()
