@@ -422,33 +422,37 @@ function Invoke-PdfPrint {
             throw 'PDF has no printable pages.'
         }
 
-        $colorBlack = @('RGB', 0, 0, 0)
-        $null = $jsDoc.addWatermarkFromText(
-            $stampText,
-            2,
-            'Helv',
-            9,
-            $colorBlack,
-            0,
-            ($pageCount - 1),
-            $true,
-            $false,
-            $true,
-            2,
-            0,
-            0,
-            18,
-            $false,
-            1.0,
-            $true,
-            0,
-            1.0
-        )
+        try {
+            $colorBlack = $jsDoc.newArray('RGB', 0, 0, 0)
+            $null = $jsDoc.addWatermarkFromText(
+                $stampText,
+                2,
+                'Helv',
+                9,
+                $colorBlack,
+                0,
+                ($pageCount - 1),
+                $true,
+                $false,
+                $true,
+                2,
+                0,
+                0,
+                18,
+                $false,
+                1.0,
+                $true,
+                0,
+                1.0
+            )
 
-        $saveFlags = $script:AcrobatSaveFull -bor $script:AcrobatSaveCollectGarbage
-        $saveOk = $pdDoc.Save($saveFlags, $tempPath)
-        if ($saveOk -ne -1) {
-            throw 'Acrobat could not save the stamped temporary PDF.'
+            $saveFlags = $script:AcrobatSaveFull -bor $script:AcrobatSaveCollectGarbage
+            $saveOk = $pdDoc.Save($saveFlags, $tempPath)
+            if ($saveOk -ne -1) {
+                Write-Log "PDF watermark save failed, printing without header: $Path"
+            }
+        } catch {
+            Write-Log "PDF watermark skipped: $($_.Exception.Message)"
         }
 
         $defaultPrinter = (New-Object System.Drawing.Printing.PrinterSettings).PrinterName
