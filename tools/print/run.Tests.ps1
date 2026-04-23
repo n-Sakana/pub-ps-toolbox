@@ -17,6 +17,72 @@ $script:SupportedExtensions = @(
 # Define the functions in this scope
 Invoke-Expression $funcBlock
 
+function New-TestPdf {
+    param(
+        [string]$Path,
+        [double]$Width = 595.28,
+        [double]$Height = 841.89
+    )
+
+    $latin1 = [System.Text.Encoding]::GetEncoding(28591)
+    $lf = "`n"
+    $widthText = [string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.##}', $Width)
+    $heightText = [string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.##}', $Height)
+    $objects = @(
+        "1 0 obj$lf<< /Type /Catalog /Pages 2 0 R >>$lf" + 'endobj' + $lf,
+        "2 0 obj$lf<< /Type /Pages /Kids [3 0 R] /Count 1 >>$lf" + 'endobj' + $lf,
+        "3 0 obj$lf<< /Type /Page /Parent 2 0 R /MediaBox [0 0 $widthText $heightText] /Resources << >> /Contents 4 0 R >>$lf" + 'endobj' + $lf,
+        "4 0 obj$lf<< /Length 0 >>$lf" + 'stream' + $lf + $lf + 'endstream' + $lf + 'endobj' + $lf
+    )
+
+    $builder = New-Object System.Text.StringBuilder
+    [void]$builder.Append("%PDF-1.4$lf")
+    $offsets = New-Object System.Collections.Generic.List[int]
+    foreach ($objectText in $objects) {
+        $offsets.Add($latin1.GetByteCount($builder.ToString()))
+        [void]$builder.Append($objectText)
+    }
+
+    $xrefOffset = $latin1.GetByteCount($builder.ToString())
+    [void]$builder.Append("xref$lf")
+    [void]$builder.Append("0 5$lf")
+    [void]$builder.Append("0000000000 65535 f $lf")
+    foreach ($offset in $offsets) {
+        [void]$builder.Append(('{0:D10} 00000 n {1}' -f $offset, $lf))
+    }
+    [void]$builder.Append("trailer$lf<< /Size 5 /Root 1 0 R >>$lf")
+    [void]$builder.Append("startxref$lf$xrefOffset$lf" + '%%EOF')
+
+    [IO.File]::WriteAllText($Path, $builder.ToString(), $latin1)
+}
+
+function Read-Latin1Text {
+    param([string]$Path)
+
+    return [IO.File]::ReadAllText($Path, [System.Text.Encoding]::GetEncoding(28591))
+}
+
+function Get-StampedPdfResult {
+    param(
+        [string]$StampText,
+        [double]$Width = 595.28,
+        [double]$Height = 841.89
+    )
+
+    $pdfPath = Join-Path ([IO.Path]::GetTempPath()) ('ps-toolbox-test-' + [guid]::NewGuid().ToString('N') + '.pdf')
+    try {
+        New-TestPdf -Path $pdfPath -Width $Width -Height $Height
+        return [pscustomobject]@{
+            Result = Add-PdfStamp -PdfPath $pdfPath -StampText $StampText
+            Raw = Read-Latin1Text -Path $pdfPath
+            Width = $Width
+            Height = $Height
+        }
+    } finally {
+        Remove-Item -LiteralPath $pdfPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Describe 'Get-StampText' {
     It 'replaces {timestamp} and {filename} tokens' {
         $result = Get-StampText -Path 'C:\docs\report.pdf'
@@ -68,26 +134,36 @@ Describe 'Header alignment - Excel' {
 }
 
 Describe 'PDF watermark parameters' {
-    # Extract arguments from addWatermarkFromText call (greedy to span multiple lines)
-    $wmPattern = '(?ms)addWatermarkFromText\((.+)\)'
-    $wmMatch = [regex]::Match($scriptContent, $wmPattern)
-    $wmArgs = $wmMatch.Groups[1].Value -split ','
-
-    It 'nHorizAlign is 2 (right)' {
-        $wmArgs[10].Trim() | Should Be '2'
+    It 'stamps a minimal PDF end-to-end' {
+        $stamped = Get-StampedPdfResult -StampText 'STAMP'
+        $stamped.Result | Should Be $true
+        $stamped.Raw | Should Match '/PsStamp Do'
+        $stamped.Raw | Should Match '/Resources\s*<<\s*/XObject\s*<<\s*/PsStamp\s+\d+\s+0\s+R\s*>>'
     }
 
-    It 'nVertAlign is valid (0, 1, or 2)' {
-        [int]($wmArgs[12].Trim()) | Should BeLessThan 3
-        [int]($wmArgs[12].Trim()) | Should Not BeLessThan 0
+    It 'uses the expected right-aligned X position' {
+        $stampText = 'STAMP'
+        $stamped = Get-StampedPdfResult -StampText $stampText
+        $streamMatch = [regex]::Match($stamped.Raw, 'BT /Helv 9 Tf 0 g (\d+) (\d+) Td \(STAMP\) Tj ET')
+
+        $streamMatch.Success | Should Be $true
+        [int]$streamMatch.Groups[1].Value | Should Be ([int][Math]::Max(0, $stamped.Width - 18 - ($stampText.Length * 4.5)))
     }
 
-    It 'nVertAlign is 0 (top) for header positioning' {
-        [int]($wmArgs[12].Trim()) | Should Be 0
+    It 'uses the expected header Y position below the top edge' {
+        $stamped = Get-StampedPdfResult -StampText 'STAMP'
+        $streamMatch = [regex]::Match($stamped.Raw, 'BT /Helv 9 Tf 0 g (\d+) (\d+) Td \(STAMP\) Tj ET')
+
+        $streamMatch.Success | Should Be $true
+        [int]$streamMatch.Groups[2].Value | Should Be ([int]($stamped.Height - 20))
+        [int]$streamMatch.Groups[2].Value | Should BeGreaterThan 0
     }
 
-    It 'nVertValue is positive (below top edge)' {
-        [int]($wmArgs[13].Trim()) | Should BeGreaterThan 0
+    It 'escapes PDF control characters in stamp text' {
+        $stamped = Get-StampedPdfResult -StampText 'A\B(C)'
+
+        $stamped.Result | Should Be $true
+        $stamped.Raw.Contains('(A\\B\(C\))') | Should Be $true
     }
 }
 
