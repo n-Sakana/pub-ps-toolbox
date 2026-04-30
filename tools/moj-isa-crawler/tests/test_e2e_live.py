@@ -62,6 +62,8 @@ def main() -> int:
         tmp = Path(tmpdir)
         output = tmp / "moj_isa_crawl.xlsx"
         download_dir = tmp / "pdfs"
+        log_file = tmp / "crawler.log"
+        error_log_file = tmp / "errors.txt"
         cmd = [
             sys.executable,
             str(SCRIPT),
@@ -73,6 +75,14 @@ def main() -> int:
             str(output),
             "--download-dir",
             str(download_dir),
+            "--log-file",
+            str(log_file),
+            "--error-log-file",
+            str(error_log_file),
+            "--progress-every-pages",
+            "1",
+            "--progress-every-pdfs",
+            "50",
             "--sleep",
             "0",
             "--max-pages",
@@ -89,6 +99,16 @@ def main() -> int:
             return completed.returncode
         if not output.exists() or output.stat().st_size == 0:
             raise AssertionError("Workbook was not created")
+        if not log_file.exists() or log_file.stat().st_size == 0:
+            raise AssertionError("Run log was not created")
+        if not error_log_file.exists() or error_log_file.stat().st_size == 0:
+            raise AssertionError("Error log was not created")
+        log_text = log_file.read_text(encoding="utf-8")
+        if "PAGE_PROGRESS" not in log_text or "PDF_DOWNLOAD_OK" not in log_text or "DONE" not in log_text:
+            raise AssertionError("Run log does not contain expected progress markers")
+        error_text = error_log_file.read_text(encoding="utf-8")
+        if "errors: 0" not in error_text or "No errors." not in error_text:
+            raise AssertionError("Empty error report was not written")
 
         workbook = load_workbook(output, read_only=True, data_only=True)
         for sheet in ["Pages", "PDFs", "Links", "Errors", "Summary"]:
@@ -139,7 +159,7 @@ def main() -> int:
         if len(sha) != 64:
             raise AssertionError(f"Invalid sha256: {sha}")
 
-        print(f"E2E OK: pages={len(pages)}, pdf_refs={len(pdfs)}, downloaded={downloaded_path.name}")
+        print(f"E2E OK: pages={len(pages)}, pdf_refs={len(pdfs)}, downloaded={downloaded_path.name}, log={log_file.name}, errors={error_log_file.name}")
         return 0
 
 

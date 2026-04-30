@@ -48,9 +48,12 @@ class PdfRecord:
     filename: str
     downloaded: bool = False
     saved_path: str = ""
+    final_url: str = ""
+    status_code: int = 0
     content_type: str = ""
     content_length: str = ""
     last_modified: str = ""
+    bytes_written: int = 0
     sha256: str = ""
     error: str = ""
 

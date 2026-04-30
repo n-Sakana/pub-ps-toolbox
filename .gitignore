@@ -8,3 +8,4 @@ tools/moj-isa-faq/*.xlsx
 tools/moj-isa-crawler/*.xlsx
 tools/moj-isa-crawler/out/
 tools/moj-isa-crawler/downloads/
+tools/moj-isa-crawler/logs/

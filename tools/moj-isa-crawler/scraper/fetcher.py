@@ -4,6 +4,7 @@ import dataclasses
 import hashlib
 import time
 from pathlib import Path
+from typing import Callable
 
 import requests
 
@@ -100,23 +101,35 @@ class Fetcher:
             content=b"",
         )
 
-    def download(self, url: str, target: Path) -> DownloadResult:
+    def download(self, url: str, target: Path, *, progress_callback: Callable[[int], None] | None = None) -> DownloadResult:
         target.parent.mkdir(parents=True, exist_ok=True)
         response = self._request("GET", url, stream=True)
         digest = hashlib.sha256()
         bytes_written = 0
+        first_bytes = b""
         with target.open("wb") as fh:
             for chunk in response.iter_content(chunk_size=1024 * 128):
                 if not chunk:
                     continue
+                if len(first_bytes) < 5:
+                    first_bytes = (first_bytes + chunk)[:5]
                 fh.write(chunk)
                 digest.update(chunk)
                 bytes_written += len(chunk)
+                if progress_callback is not None:
+                    progress_callback(bytes_written)
+        if bytes_written == 0:
+            target.unlink(missing_ok=True)
+            raise FetchError(f"GET {url} downloaded 0 bytes")
+        content_type = response.headers.get("Content-Type", "")
+        if first_bytes and not first_bytes.startswith(b"%PDF-") and "pdf" not in content_type.lower():
+            target.unlink(missing_ok=True)
+            raise FetchError(f"GET {url} did not return a PDF: Content-Type={content_type!r}, first_bytes={first_bytes!r}")
         return DownloadResult(
             url=url,
             final_url=response.url,
             status_code=response.status_code,
-            content_type=response.headers.get("Content-Type", ""),
+            content_type=content_type,
             content_length=response.headers.get("Content-Length", ""),
             last_modified=response.headers.get("Last-Modified", ""),
             sha256=digest.hexdigest(),
