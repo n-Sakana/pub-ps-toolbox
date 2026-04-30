@@ -1,0 +1,16 @@
+{
+  "allowed_prefixes": [
+    "https://www.moj.go.jp/isa/"
+  ],
+  "same_netloc_only": true,
+  "default_output": "moj_isa_crawl.xlsx",
+  "default_download_dir": "downloads/pdfs",
+  "download_pdfs_by_default": false,
+  "probe_pdfs_by_default": false,
+  "timeout": 30,
+  "sleep": 0.2,
+  "retries": 2,
+  "max_pages": null,
+  "max_depth": null,
+  "strict": true
+}

@@ -1,4 +1,4 @@
-﻿# ps-toolbox
+# ps-toolbox
 
 PowerShell toolbox host for Explorer context-menu tools.
 
@@ -7,6 +7,7 @@ PowerShell toolbox host for Explorer context-menu tools.
 - `Print`: print PDF / Word / Excel with a timestamp header
 - `Rename`: preview and rename selected files or folders
 - `MOJ ISA FAQ Excel Scraper`: scrape ISA/MOJ FAQ pages and export Q&A to Excel
+- `MOJ ISA Site Crawler`: crawl ISA/MOJ pages and export page/PDF inventory to Excel
 
 ## How It Works
 
@@ -43,6 +44,14 @@ ps-toolbox/
       requirements.txt
       test_e2e.py
       README.md
+    moj-isa-crawler/
+      URL.txt
+      config.json
+      crawler.py
+      requirements.txt
+      scraper/
+      tests/
+      README.md
 ```
 
 ## MOJ ISA FAQ Excel Scraper
@@ -60,3 +69,19 @@ python test_e2e.py
 
 `URL.txt` にFAQインデックスURLを1行で置き、`qa_scraper.py` が配下8ページを自動検出します。既定の出力ファイルは `moj_isa_faq.xlsx` です。
 詳しい使い方は `tools/moj-isa-faq/README.md` を参照してください。
+
+## MOJ ISA Site Crawler
+
+出入国在留管理庁サイト `https://www.moj.go.jp/isa/` 配下をクロールし、HTMLページ構造とPDFリンク一覧をExcelに出力するPython CLIです。
+
+```bash
+cd tools/moj-isa-crawler
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python crawler.py
+python crawler.py --download-pdfs --max-pdf-downloads 10
+python tests/test_e2e_live.py
+```
+
+既定ではPDF本体は保存せず、`moj_isa_crawl.xlsx` に Pages / PDFs / Links / Errors / Summary を出します。詳しい使い方は `tools/moj-isa-crawler/README.md` を参照してください。
