@@ -30,6 +30,8 @@ python crawler.py
 
 既定ではPDFファイル本体は保存せず、HTMLページ、リンク、PDF参照の一覧を `moj_isa_crawl.xlsx` に出します。CLIにはページ単位の進捗が出て、詳細ログは `logs/moj_isa_crawler.log`、エラーログは `logs/moj_isa_errors.txt` に保存されます。
 
+HTMLページ取得は既定で並列化しています。`config.json` の `max_page_workers` がHTML取得の並列数、`max_pdf_workers` がPDFのHEAD確認・保存の並列数です。ネットワークI/O待ちが主犯なので、補助プロセスではなく `ThreadPoolExecutor` を使っています。GILと殴り合うより、待っている湯を同時に沸かすほうが筋です。
+
 ページ取得やPDF処理で一部失敗しても、既定では最後まで走って一覧、統計、エラーログを作ります。止めたい場合だけ `--strict` を付けます。行政サイトの古いリンクで全体を止めると、166ページで「全部見た気」になるので、少々危険です。
 
 いきなり全PDFを落とすと床に茶葉を撒くので、試作段階ではメタデータ優先です。PDF保存が必要な場合は、必ず `--download-pdfs` を付けます。
@@ -53,6 +55,7 @@ python crawler.py --download-pdfs --max-pdf-downloads 10
 python crawler.py --output out/moj_isa_crawl.xlsx
 python crawler.py --log-file out/crawl.log --error-log-file out/errors.txt
 python crawler.py --progress-every-pages 5 --progress-every-pdfs 20
+python crawler.py --max-page-workers 8 --max-pdf-workers 3
 python crawler.py --graph-dir out/graphs
 python crawler.py --no-graphs
 python crawler.py --strict
@@ -87,6 +90,23 @@ https://www.moj.go.jp/isa/
 ```
 
 クロール範囲は `config.json` の `allowed_prefixes` で制限しています。現在は `https://www.moj.go.jp/isa/` 配下のみです。外部リンクはExcelに記録しますが、たどりません。
+
+`config.json` には既定値をまとめています。CLIオプションを付けた場合はCLI側が優先されます。
+
+```json
+{
+  "max_page_workers": 8,
+  "max_pdf_workers": 3,
+  "max_pages": null,
+  "max_depth": null,
+  "max_pdf_downloads": null,
+  "sleep": 0.2,
+  "timeout": 30,
+  "retries": 2
+}
+```
+
+入管庁側や社内EDRに疑われる場合は、まず `max_page_workers` と `max_pdf_workers` を下げます。速くしすぎるとログは賑やかになりますが、相手から見ると小さな突撃です。
 
 ## 出力Excel
 

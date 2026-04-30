@@ -17,6 +17,9 @@
   "retries": 2,
   "max_pages": null,
   "max_depth": null,
+  "max_pdf_downloads": null,
+  "max_page_workers": 8,
+  "max_pdf_workers": 3,
   "strict": false,
   "default_graph_dir": "graphs",
   "generate_graphs_by_default": true

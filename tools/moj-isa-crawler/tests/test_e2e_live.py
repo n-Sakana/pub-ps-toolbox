@@ -107,7 +107,15 @@ def main() -> int:
         if not error_log_file.exists() or error_log_file.stat().st_size == 0:
             raise AssertionError("Error log was not created")
         log_text = log_file.read_text(encoding="utf-8")
-        if "PAGE_PROGRESS" not in log_text or "PDF_DOWNLOAD_OK" not in log_text or "PDF_FINAL_VERIFY" not in log_text or "GRAPH_PHASE_DONE" not in log_text or "DONE" not in log_text:
+        if (
+            "PAGE_BATCH_START" not in log_text
+            or "PAGE_PROGRESS" not in log_text
+            or "PDF_PARALLEL_START" not in log_text
+            or "PDF_DOWNLOAD_OK" not in log_text
+            or "PDF_FINAL_VERIFY" not in log_text
+            or "GRAPH_PHASE_DONE" not in log_text
+            or "DONE" not in log_text
+        ):
             raise AssertionError("Run log does not contain expected progress markers")
         error_text = error_log_file.read_text(encoding="utf-8")
         if "errors: 0" not in error_text or "No errors." not in error_text:

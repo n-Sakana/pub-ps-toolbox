@@ -15,8 +15,11 @@ import datetime as dt
 import json
 import logging
 import sys
+import threading
 import traceback
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -46,6 +49,27 @@ DEFAULT_CONFIG_FILE = ROOT / "config.json"
 
 class CrawlError(RuntimeError):
     pass
+
+
+@dataclass
+class PageCrawlResult:
+    requested_url: str
+    source_page_url: str
+    depth: int
+    final_url: str = ""
+    page: PageRecord | None = None
+    links: list[LinkRecord] = field(default_factory=list)
+    pdfs: list[PdfRecord] = field(default_factory=list)
+    discovered_page_urls: list[str] = field(default_factory=list)
+    errors: list[ErrorRecord] = field(default_factory=list)
+
+
+@dataclass
+class PdfTaskResult:
+    pdf_url: str
+    source_page_url: str
+    meta: dict[str, object]
+    errors: list[ErrorRecord] = field(default_factory=list)
 
 
 def read_url_file(path: Path) -> list[str]:
@@ -91,6 +115,9 @@ def load_config(path: Path) -> dict[str, Any]:
         "retries",
         "max_pages",
         "max_depth",
+        "max_pdf_downloads",
+        "max_page_workers",
+        "max_pdf_workers",
         "strict",
     ]
     missing = [key for key in required if key not in config]
@@ -98,7 +125,28 @@ def load_config(path: Path) -> dict[str, Any]:
         raise CrawlError(f"Config missing required keys: {', '.join(missing)}")
     if not isinstance(config["allowed_prefixes"], list) or not config["allowed_prefixes"]:
         raise CrawlError("Config allowed_prefixes must be a non-empty list")
+    for key in ["max_page_workers", "max_pdf_workers"]:
+        try:
+            value = int(config[key])
+        except (TypeError, ValueError) as exc:
+            raise CrawlError(f"Config {key} must be an integer >= 1") from exc
+        if value < 1:
+            raise CrawlError(f"Config {key} must be an integer >= 1")
+    if config["max_pdf_downloads"] is not None:
+        try:
+            max_pdf_downloads = int(config["max_pdf_downloads"])
+        except (TypeError, ValueError) as exc:
+            raise CrawlError("Config max_pdf_downloads must be null or an integer >= 0") from exc
+        if max_pdf_downloads < 0:
+            raise CrawlError("Config max_pdf_downloads must be null or an integer >= 0")
     return config
+
+
+def positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return number
 
 
 def positive_int_or_none(value: str | None) -> int | None:
@@ -130,6 +178,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--sleep", type=float)
     parser.add_argument("--timeout", type=int)
     parser.add_argument("--retries", type=int)
+    parser.add_argument("--max-page-workers", type=positive_int, help="parallel HTML page fetch workers")
+    parser.add_argument("--max-pdf-workers", type=positive_int, help="parallel PDF probe/download workers")
     parser.add_argument("--no-graphs", action="store_true", help="skip PNG graph generation")
     parser.add_argument("--strict", action="store_true", help="fail immediately on page/PDF errors")
     parser.add_argument("--allow-errors", action="store_true", help="write workbook even when some pages/PDFs fail")
@@ -243,6 +293,283 @@ def make_unique_path(download_dir: Path, filename: str, used: set[Path]) -> Path
     return candidate
 
 
+def crawl_page_task(
+    *,
+    url: str,
+    depth: int,
+    source_page_url: str,
+    start_netloc: str,
+    allowed_prefixes: list[str],
+    same_netloc_only: bool,
+    timeout: int,
+    sleep: float,
+    retries: int,
+    logger: logging.Logger,
+) -> PageCrawlResult:
+    """Fetch and parse one HTML page.
+
+    Each task owns its own Fetcher/requests.Session. requests.Session is not a
+    good shared teapot; giving every worker its own one avoids thread-safety
+    ambiguity while still parallelizing the network wait.
+    """
+
+    worker = threading.current_thread().name
+    result = PageCrawlResult(requested_url=url, source_page_url=source_page_url, depth=depth)
+    try:
+        logger.info("PAGE_FETCH_START worker=%s depth=%s url=%s source=%s", worker, depth, url, source_page_url)
+        fetcher = Fetcher(timeout=timeout, sleep=sleep, retries=retries, user_agent=DEFAULT_USER_AGENT)
+        fetched = fetcher.get(url)
+        result.final_url = fetched.final_url
+        if not looks_like_html(fetched.content_type, fetched.content):
+            message = (
+                f"Non-HTML response: status={fetched.status_code} "
+                f"content_type={fetched.content_type!r} bytes={len(fetched.content)}"
+            )
+            result.errors.append(
+                error_from_message(
+                    phase="page_non_html",
+                    url=fetched.final_url,
+                    source_page_url=source_page_url,
+                    message=message,
+                    exception_type="NonHtmlResponse",
+                )
+            )
+            logger.warning(
+                "PAGE_SKIP_NON_HTML worker=%s depth=%s status=%s content_type=%s bytes=%s url=%s source=%s",
+                worker,
+                depth,
+                fetched.status_code,
+                fetched.content_type,
+                len(fetched.content),
+                fetched.final_url,
+                source_page_url,
+            )
+            return result
+
+        soup = parse_html(fetched.text())
+        title = page_title(soup)
+        page_links = extract_links(
+            soup,
+            fetched.final_url,
+            start_netloc=start_netloc,
+            allowed_prefixes=allowed_prefixes,
+            same_netloc_only=same_netloc_only,
+        )
+        body_text, text_length = visible_body_text(soup)
+        table_data, table_count = tables_json(soup)
+        result.page = PageRecord(
+            order=0,
+            depth=depth,
+            section=section_from_url(fetched.final_url),
+            url=fetched.final_url,
+            status_code=fetched.status_code,
+            content_type=fetched.content_type,
+            title=title,
+            h1=h1_text(soup),
+            breadcrumb=breadcrumb_text(soup),
+            headings_json=headings_json(soup),
+            body_text=body_text,
+            text_length=text_length,
+            table_count=table_count,
+            tables_json=table_data,
+            link_count=len(page_links),
+            internal_page_link_count=len([link for link in page_links if link.category == "internal_page"]),
+            pdf_link_count=len([link for link in page_links if link.category == "pdf"]),
+            fetched_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+        )
+        for link in page_links:
+            result.links.append(
+                LinkRecord(
+                    source_page_url=fetched.final_url,
+                    source_page_title=title,
+                    link_text=link.text,
+                    url=link.url,
+                    category=link.category,
+                )
+            )
+            if link.category == "pdf":
+                result.pdfs.append(
+                    PdfRecord(
+                        source_page_url=fetched.final_url,
+                        source_page_title=title,
+                        source_section=section_from_url(fetched.final_url),
+                        link_text=link.text,
+                        pdf_url=link.url,
+                        filename=safe_filename_from_url(link.url),
+                    )
+                )
+            elif link.category == "internal_page" and is_allowed_by_prefix(link.url, allowed_prefixes):
+                result.discovered_page_urls.append(link.url)
+        logger.info(
+            "PAGE_FETCH_OK worker=%s depth=%s status=%s page_links=%s pdf_links=%s url=%s title=%s",
+            worker,
+            depth,
+            fetched.status_code,
+            result.page.internal_page_link_count,
+            result.page.pdf_link_count,
+            fetched.final_url,
+            title,
+        )
+        return result
+    except Exception as exc:
+        result.errors.append(error_from_exception(phase="page", url=url, source_page_url=source_page_url, exc=exc))
+        logger.error("PAGE_ERROR worker=%s url=%s source=%s message=%s", worker, url, source_page_url, exc, exc_info=True)
+        return result
+
+
+def handle_pdf_task(
+    *,
+    pdf_index: int,
+    total_pdfs: int,
+    pdf_url: str,
+    exemplar: PdfRecord,
+    mode: str,
+    target: Path | None,
+    timeout: int,
+    sleep: float,
+    retries: int,
+    log_probe: bool,
+    logger: logging.Logger,
+) -> PdfTaskResult:
+    worker = threading.current_thread().name
+    meta: dict[str, object] = {"filename": exemplar.filename}
+    try:
+        fetcher = Fetcher(timeout=timeout, sleep=sleep, retries=retries, user_agent=DEFAULT_USER_AGENT)
+        if mode == "download":
+            if target is None:
+                raise CrawlError("PDF download task has no target path")
+            logger.info(
+                "PDF_DOWNLOAD_START worker=%s index=%s total=%s url=%s target=%s",
+                worker,
+                pdf_index,
+                total_pdfs,
+                pdf_url,
+                target,
+            )
+            last_logged_mb = -1
+
+            def log_download_progress(bytes_written: int) -> None:
+                nonlocal last_logged_mb
+                current_mb = bytes_written // (1024 * 1024)
+                if current_mb > last_logged_mb:
+                    last_logged_mb = current_mb
+                    logger.info(
+                        "PDF_DOWNLOAD_PROGRESS worker=%s index=%s total=%s bytes=%s target=%s",
+                        worker,
+                        pdf_index,
+                        total_pdfs,
+                        bytes_written,
+                        target,
+                    )
+
+            def log_download_event(event: str, data: dict[str, object]) -> None:
+                if event == "response":
+                    logger.info(
+                        "PDF_RESPONSE worker=%s index=%s total=%s status=%s content_type=%s content_length=%s final_url=%s headers=%s",
+                        worker,
+                        pdf_index,
+                        total_pdfs,
+                        data.get("status_code"),
+                        data.get("content_type"),
+                        data.get("content_length"),
+                        data.get("final_url"),
+                        data.get("headers"),
+                    )
+                elif event == "part_verify":
+                    logger.info(
+                        "PDF_PART_VERIFY worker=%s index=%s total=%s bytes_written=%s part_size=%s first_bytes_hex=%s readback_hex=%s part=%s",
+                        worker,
+                        pdf_index,
+                        total_pdfs,
+                        data.get("bytes_written"),
+                        data.get("part_size"),
+                        data.get("first_bytes_hex"),
+                        data.get("readback_hex"),
+                        data.get("part_path"),
+                    )
+                elif event == "final_verify":
+                    logger.info(
+                        "PDF_FINAL_VERIFY worker=%s index=%s total=%s post_write_size=%s readback_hex=%s readback_ok=%s saved=%s",
+                        worker,
+                        pdf_index,
+                        total_pdfs,
+                        data.get("post_write_size"),
+                        data.get("readback_hex"),
+                        data.get("readback_ok"),
+                        data.get("saved_path"),
+                    )
+
+            download_result = fetcher.download(pdf_url, target, progress_callback=log_download_progress, event_callback=log_download_event)
+            meta.update(
+                {
+                    "downloaded": True,
+                    "saved_path": str(download_result.saved_path),
+                    "final_url": download_result.final_url,
+                    "status_code": download_result.status_code,
+                    "content_type": download_result.content_type,
+                    "content_length": download_result.content_length or str(download_result.bytes_written),
+                    "last_modified": download_result.last_modified,
+                    "bytes_written": download_result.bytes_written,
+                    "sha256": download_result.sha256,
+                    "response_headers_json": download_result.response_headers_json,
+                    "first_bytes_hex": download_result.first_bytes_hex,
+                    "post_write_size": download_result.post_write_size,
+                    "post_write_readback_ok": download_result.post_write_readback_ok,
+                }
+            )
+            logger.info(
+                "PDF_DOWNLOAD_OK worker=%s index=%s total=%s bytes=%s sha256=%s saved=%s",
+                worker,
+                pdf_index,
+                total_pdfs,
+                download_result.bytes_written,
+                download_result.sha256,
+                download_result.saved_path,
+            )
+        elif mode == "probe":
+            if log_probe:
+                logger.info("PDF_PROBE_START worker=%s index=%s total=%s url=%s", worker, pdf_index, total_pdfs, pdf_url)
+            head_result = fetcher.head(pdf_url)
+            meta.update(
+                {
+                    "downloaded": False,
+                    "final_url": head_result.final_url,
+                    "status_code": head_result.status_code,
+                    "content_type": head_result.content_type,
+                    "content_length": head_result.content_length,
+                    "last_modified": head_result.last_modified,
+                }
+            )
+            if log_probe:
+                logger.info(
+                    "PDF_PROBE_OK worker=%s index=%s total=%s status=%s content_type=%s content_length=%s url=%s",
+                    worker,
+                    pdf_index,
+                    total_pdfs,
+                    head_result.status_code,
+                    head_result.content_type,
+                    head_result.content_length,
+                    pdf_url,
+                )
+        else:
+            raise CrawlError(f"Unsupported PDF task mode: {mode}")
+        return PdfTaskResult(pdf_url=pdf_url, source_page_url=exemplar.source_page_url, meta=meta)
+    except Exception as exc:
+        meta.update({"error": str(exc)})
+        error = error_from_exception(phase="pdf", url=pdf_url, source_page_url=exemplar.source_page_url, exc=exc)
+        logger.error(
+            "PDF_ERROR worker=%s index=%s total=%s url=%s source=%s message=%s",
+            worker,
+            pdf_index,
+            total_pdfs,
+            pdf_url,
+            exemplar.source_page_url,
+            exc,
+            exc_info=True,
+        )
+        return PdfTaskResult(pdf_url=pdf_url, source_page_url=exemplar.source_page_url, meta=meta, errors=[error])
+
+
 def crawl(argv: list[str]) -> int:
     args = parse_args(argv)
     config = load_config(args.config)
@@ -267,6 +594,13 @@ def crawl(argv: list[str]) -> int:
     retries = args.retries if args.retries is not None else int(config["retries"])
     max_pages = args.max_pages if args.max_pages is not None else config["max_pages"]
     max_depth = args.max_depth if args.max_depth is not None else config["max_depth"]
+    max_pdf_downloads = args.max_pdf_downloads if args.max_pdf_downloads is not None else config["max_pdf_downloads"]
+    max_page_workers = args.max_page_workers if args.max_page_workers is not None else int(config["max_page_workers"])
+    max_pdf_workers = args.max_pdf_workers if args.max_pdf_workers is not None else int(config["max_pdf_workers"])
+    if max_pdf_downloads is not None:
+        max_pdf_downloads = int(max_pdf_downloads)
+        if max_pdf_downloads < 0:
+            raise CrawlError("max_pdf_downloads must be >= 0")
     if args.strict and args.allow_errors:
         raise CrawlError("--strict and --allow-errors cannot be used together")
     strict = args.strict or (bool(config["strict"]) and not args.allow_errors)
@@ -274,7 +608,8 @@ def crawl(argv: list[str]) -> int:
     logger = setup_logging(log_file=log_file, log_level=log_level)
     logger.info(
         "START start_urls=%s allowed_prefixes=%s output=%s download_pdfs=%s probe_pdfs=%s "
-        "download_dir=%s generate_graphs=%s graph_dir=%s max_pages=%s max_depth=%s strict=%s log_file=%s error_log_file=%s",
+        "download_dir=%s generate_graphs=%s graph_dir=%s max_pages=%s max_depth=%s max_pdf_downloads=%s "
+        "page_workers=%s pdf_workers=%s strict=%s log_file=%s error_log_file=%s",
         len(start_urls),
         allowed_prefixes,
         output,
@@ -285,267 +620,203 @@ def crawl(argv: list[str]) -> int:
         graph_dir,
         max_pages,
         max_depth,
+        max_pdf_downloads,
+        max_page_workers,
+        max_pdf_workers,
         strict,
         log_file,
         error_log_file,
     )
 
-    fetcher = Fetcher(timeout=timeout, sleep=sleep, retries=retries, user_agent=DEFAULT_USER_AGENT)
     queue: deque[tuple[str, int, str]] = deque((url, 0, "") for url in start_urls)
-    queued = set(start_urls)
+    queued: set[str] = set(start_urls)
     visited: set[str] = set()
+    completed_page_urls: set[str] = set()
     pages: list[PageRecord] = []
     links: list[LinkRecord] = []
     pdfs: list[PdfRecord] = []
     errors: list[ErrorRecord] = []
 
+    logger.info("PAGE_PHASE_START workers=%s queued=%s", max_page_workers, len(queue))
     while queue:
         if max_pages is not None and len(pages) >= int(max_pages):
             break
-        url, depth, source_page_url = queue.popleft()
-        if url in visited:
-            continue
-        if max_depth is not None and depth > int(max_depth):
-            continue
-        visited.add(url)
-        try:
-            logger.info("PAGE_FETCH_START depth=%s url=%s source=%s queue_remaining=%s", depth, url, source_page_url, len(queue))
-            fetched = fetcher.get(url)
-            if fetched.final_url != url:
-                visited.add(fetched.final_url)
-            if not looks_like_html(fetched.content_type, fetched.content):
-                message = (
-                    f"Non-HTML response: status={fetched.status_code} "
-                    f"content_type={fetched.content_type!r} bytes={len(fetched.content)}"
-                )
-                errors.append(error_from_message(phase="page_non_html", url=fetched.final_url, source_page_url=source_page_url, message=message, exception_type="NonHtmlResponse"))
-                logger.warning("PAGE_SKIP_NON_HTML depth=%s status=%s content_type=%s bytes=%s url=%s source=%s", depth, fetched.status_code, fetched.content_type, len(fetched.content), fetched.final_url, source_page_url)
-                if strict:
-                    write_workbook(output, pages=pages, pdfs=pdfs, links=links, errors=errors)
-                    write_error_report(error_log_file, errors)
-                    raise CrawlError(message)
-                continue
-            soup = parse_html(fetched.text())
-            title = page_title(soup)
-            page_links = extract_links(
-                soup,
-                fetched.final_url,
-                start_netloc=start_netloc,
-                allowed_prefixes=allowed_prefixes,
-                same_netloc_only=same_netloc_only,
-            )
-            body_text, text_length = visible_body_text(soup)
-            table_data, table_count = tables_json(soup)
-            page = PageRecord(
-                order=len(pages) + 1,
-                depth=depth,
-                section=section_from_url(fetched.final_url),
-                url=fetched.final_url,
-                status_code=fetched.status_code,
-                content_type=fetched.content_type,
-                title=title,
-                h1=h1_text(soup),
-                breadcrumb=breadcrumb_text(soup),
-                headings_json=headings_json(soup),
-                body_text=body_text,
-                text_length=text_length,
-                table_count=table_count,
-                tables_json=table_data,
-                link_count=len(page_links),
-                internal_page_link_count=len([link for link in page_links if link.category == "internal_page"]),
-                pdf_link_count=len([link for link in page_links if link.category == "pdf"]),
-                fetched_at=dt.datetime.now(dt.timezone.utc).isoformat(),
-            )
-            pages.append(page)
-            if should_log_progress(len(pages), progress_every_pages):
-                logger.info(
-                    "PAGE_PROGRESS crawled=%s limit=%s depth=%s status=%s page_links=%s pdf_links=%s queued=%s title=%s url=%s",
-                    len(pages),
-                    max_pages if max_pages is not None else "unbounded",
-                    depth,
-                    fetched.status_code,
-                    page.internal_page_link_count,
-                    page.pdf_link_count,
-                    len(queue),
-                    title,
-                    fetched.final_url,
-                )
 
-            for link in page_links:
-                links.append(
-                    LinkRecord(
-                        source_page_url=fetched.final_url,
-                        source_page_title=title,
-                        link_text=link.text,
-                        url=link.url,
-                        category=link.category,
-                    )
+        batch: list[tuple[str, int, str]] = []
+        remaining_page_slots = None if max_pages is None else max(0, int(max_pages) - len(pages))
+        batch_limit = max_page_workers if remaining_page_slots is None else min(max_page_workers, remaining_page_slots)
+        if batch_limit <= 0:
+            break
+
+        while queue and len(batch) < batch_limit:
+            url, depth, source_page_url = queue.popleft()
+            if url in visited:
+                continue
+            if max_depth is not None and depth > int(max_depth):
+                continue
+            visited.add(url)
+            batch.append((url, depth, source_page_url))
+
+        if not batch:
+            continue
+
+        logger.info(
+            "PAGE_BATCH_START batch_size=%s workers=%s crawled=%s limit=%s queue_remaining=%s",
+            len(batch),
+            max_page_workers,
+            len(pages),
+            max_pages if max_pages is not None else "unbounded",
+            len(queue),
+        )
+        with ThreadPoolExecutor(max_workers=max_page_workers, thread_name_prefix="page") as executor:
+            futures = [
+                executor.submit(
+                    crawl_page_task,
+                    url=url,
+                    depth=depth,
+                    source_page_url=source_page_url,
+                    start_netloc=start_netloc,
+                    allowed_prefixes=allowed_prefixes,
+                    same_netloc_only=same_netloc_only,
+                    timeout=timeout,
+                    sleep=sleep,
+                    retries=retries,
+                    logger=logger,
                 )
-                if link.category == "pdf":
-                    pdfs.append(
-                        PdfRecord(
-                            source_page_url=fetched.final_url,
-                            source_page_title=title,
-                            source_section=section_from_url(fetched.final_url),
-                            link_text=link.text,
-                            pdf_url=link.url,
-                            filename=safe_filename_from_url(link.url),
-                        )
+                for url, depth, source_page_url in batch
+            ]
+            for future in as_completed(futures):
+                result = future.result()
+                if result.final_url:
+                    visited.add(result.final_url)
+                if result.errors:
+                    errors.extend(result.errors)
+                    if strict:
+                        write_workbook(output, pages=pages, pdfs=pdfs, links=links, errors=errors)
+                        write_error_report(error_log_file, errors)
+                        first_error = result.errors[0]
+                        raise CrawlError(f"Page crawl failed: {first_error.url}: {first_error.message}")
+                if result.page is None:
+                    continue
+                if result.page.url in completed_page_urls:
+                    logger.info("PAGE_DUPLICATE_SKIP requested=%s final=%s", result.requested_url, result.page.url)
+                    continue
+
+                result.page.order = len(pages) + 1
+                pages.append(result.page)
+                completed_page_urls.add(result.page.url)
+                links.extend(result.links)
+                pdfs.extend(result.pdfs)
+                if should_log_progress(len(pages), progress_every_pages):
+                    logger.info(
+                        "PAGE_PROGRESS crawled=%s limit=%s depth=%s status=%s page_links=%s pdf_links=%s queued=%s title=%s url=%s",
+                        len(pages),
+                        max_pages if max_pages is not None else "unbounded",
+                        result.page.depth,
+                        result.page.status_code,
+                        result.page.internal_page_link_count,
+                        result.page.pdf_link_count,
+                        len(queue),
+                        result.page.title,
+                        result.page.url,
                     )
-                elif link.category == "internal_page" and link.url not in visited and link.url not in queued:
-                    if is_allowed_by_prefix(link.url, allowed_prefixes):
-                        queued.add(link.url)
-                        queue.append((link.url, depth + 1, fetched.final_url))
-        except CrawlError:
-            raise
-        except Exception as exc:
-            errors.append(error_from_exception(phase="page", url=url, source_page_url=source_page_url, exc=exc))
-            logger.error("PAGE_ERROR url=%s source=%s message=%s", url, source_page_url, exc, exc_info=True)
-            if strict:
-                write_workbook(output, pages=pages, pdfs=pdfs, links=links, errors=errors)
-                write_error_report(error_log_file, errors)
-                raise CrawlError(f"Page crawl failed: {url}: {exc}") from exc
+
+                for discovered_url in result.discovered_page_urls:
+                    if discovered_url in visited or discovered_url in queued:
+                        continue
+                    queued.add(discovered_url)
+                    queue.append((discovered_url, result.depth + 1, result.page.url))
+
+        logger.info(
+            "PAGE_BATCH_DONE crawled=%s queued=%s visited=%s errors=%s",
+            len(pages),
+            len(queue),
+            len(visited),
+            len(errors),
+        )
 
     # Enrich or download unique PDFs, then copy metadata back to every reference.
     pdf_meta: dict[str, dict[str, object]] = {}
     used_paths: set[Path] = set()
-    downloaded_count = 0
     unique_pdf_urls = list(dict.fromkeys(pdf.pdf_url for pdf in pdfs))
+    exemplar_by_pdf_url: dict[str, PdfRecord] = {}
+    for pdf in pdfs:
+        exemplar_by_pdf_url.setdefault(pdf.pdf_url, pdf)
     logger.info(
-        "PDF_PHASE_START unique_pdfs=%s references=%s download_pdfs=%s probe_pdfs=%s max_pdf_downloads=%s",
+        "PDF_PHASE_START unique_pdfs=%s references=%s download_pdfs=%s probe_pdfs=%s max_pdf_downloads=%s workers=%s",
         len(unique_pdf_urls),
         len(pdfs),
         download_pdfs,
         probe_pdfs,
-        args.max_pdf_downloads,
+        max_pdf_downloads,
+        max_pdf_workers,
     )
+
+    pdf_tasks: list[dict[str, object]] = []
+    downloads_assigned = 0
     for pdf_index, pdf_url in enumerate(unique_pdf_urls, start=1):
-        exemplar = next(pdf for pdf in pdfs if pdf.pdf_url == pdf_url)
-        meta: dict[str, object] = {"filename": exemplar.filename}
-        try:
-            if download_pdfs and (args.max_pdf_downloads is None or downloaded_count < args.max_pdf_downloads):
-                target = make_unique_path(download_dir, exemplar.filename, used_paths)
-                logger.info("PDF_DOWNLOAD_START index=%s total=%s url=%s target=%s", pdf_index, len(unique_pdf_urls), pdf_url, target)
-                last_logged_mb = -1
-
-                def log_download_progress(bytes_written: int) -> None:
-                    nonlocal last_logged_mb
-                    current_mb = bytes_written // (1024 * 1024)
-                    if current_mb > last_logged_mb:
-                        last_logged_mb = current_mb
-                        logger.info(
-                            "PDF_DOWNLOAD_PROGRESS index=%s total=%s bytes=%s target=%s",
-                            pdf_index,
-                            len(unique_pdf_urls),
-                            bytes_written,
-                            target,
-                        )
-
-                def log_download_event(event: str, data: dict[str, object]) -> None:
-                    if event == "response":
-                        logger.info(
-                            "PDF_RESPONSE index=%s total=%s status=%s content_type=%s content_length=%s final_url=%s headers=%s",
-                            pdf_index,
-                            len(unique_pdf_urls),
-                            data.get("status_code"),
-                            data.get("content_type"),
-                            data.get("content_length"),
-                            data.get("final_url"),
-                            data.get("headers"),
-                        )
-                    elif event == "part_verify":
-                        logger.info(
-                            "PDF_PART_VERIFY index=%s total=%s bytes_written=%s part_size=%s first_bytes_hex=%s readback_hex=%s part=%s",
-                            pdf_index,
-                            len(unique_pdf_urls),
-                            data.get("bytes_written"),
-                            data.get("part_size"),
-                            data.get("first_bytes_hex"),
-                            data.get("readback_hex"),
-                            data.get("part_path"),
-                        )
-                    elif event == "final_verify":
-                        logger.info(
-                            "PDF_FINAL_VERIFY index=%s total=%s post_write_size=%s readback_hex=%s readback_ok=%s saved=%s",
-                            pdf_index,
-                            len(unique_pdf_urls),
-                            data.get("post_write_size"),
-                            data.get("readback_hex"),
-                            data.get("readback_ok"),
-                            data.get("saved_path"),
-                        )
-
-                result = fetcher.download(pdf_url, target, progress_callback=log_download_progress, event_callback=log_download_event)
-                downloaded_count += 1
-                meta.update(
-                    {
-                        "downloaded": True,
-                        "saved_path": str(result.saved_path),
-                        "final_url": result.final_url,
-                        "status_code": result.status_code,
-                        "content_type": result.content_type,
-                        "content_length": result.content_length or str(result.bytes_written),
-                        "last_modified": result.last_modified,
-                        "bytes_written": result.bytes_written,
-                        "sha256": result.sha256,
-                        "response_headers_json": result.response_headers_json,
-                        "first_bytes_hex": result.first_bytes_hex,
-                        "post_write_size": result.post_write_size,
-                        "post_write_readback_ok": result.post_write_readback_ok,
-                    }
-                )
+        exemplar = exemplar_by_pdf_url[pdf_url]
+        if download_pdfs and (max_pdf_downloads is None or downloads_assigned < max_pdf_downloads):
+            target = make_unique_path(download_dir, exemplar.filename, used_paths)
+            downloads_assigned += 1
+            pdf_tasks.append({"pdf_index": pdf_index, "pdf_url": pdf_url, "exemplar": exemplar, "mode": "download", "target": target})
+        elif download_pdfs and max_pdf_downloads is not None:
+            pdf_meta[pdf_url] = {"filename": exemplar.filename, "downloaded": False, "error": "skipped_by_max_pdf_downloads"}
+            if should_log_progress(pdf_index, progress_every_pdfs):
                 logger.info(
-                    "PDF_DOWNLOAD_OK index=%s total=%s bytes=%s sha256=%s saved=%s",
+                    "PDF_SKIP_PROGRESS index=%s total=%s reason=skipped_by_max_pdf_downloads url=%s",
                     pdf_index,
                     len(unique_pdf_urls),
-                    result.bytes_written,
-                    result.sha256,
-                    result.saved_path,
+                    pdf_url,
                 )
-            elif download_pdfs and args.max_pdf_downloads is not None:
-                meta.update({"downloaded": False, "error": "skipped_by_max_pdf_downloads"})
-                if should_log_progress(pdf_index, progress_every_pdfs):
-                    logger.info(
-                        "PDF_SKIP_PROGRESS index=%s total=%s reason=skipped_by_max_pdf_downloads url=%s",
-                        pdf_index,
-                        len(unique_pdf_urls),
-                        pdf_url,
-                    )
-            elif probe_pdfs:
-                if should_log_progress(pdf_index, progress_every_pdfs):
-                    logger.info("PDF_PROBE_START index=%s total=%s url=%s", pdf_index, len(unique_pdf_urls), pdf_url)
-                result = fetcher.head(pdf_url)
-                meta.update(
-                    {
-                        "downloaded": False,
-                        "final_url": result.final_url,
-                        "status_code": result.status_code,
-                        "content_type": result.content_type,
-                        "content_length": result.content_length,
-                        "last_modified": result.last_modified,
-                    }
-                )
-                if should_log_progress(pdf_index, progress_every_pdfs):
-                    logger.info(
-                        "PDF_PROBE_OK index=%s total=%s status=%s content_type=%s content_length=%s url=%s",
-                        pdf_index,
-                        len(unique_pdf_urls),
-                        result.status_code,
-                        result.content_type,
-                        result.content_length,
-                        pdf_url,
-                    )
-            elif should_log_progress(pdf_index, progress_every_pdfs):
+        elif probe_pdfs:
+            pdf_tasks.append({"pdf_index": pdf_index, "pdf_url": pdf_url, "exemplar": exemplar, "mode": "probe", "target": None})
+        else:
+            pdf_meta[pdf_url] = {"filename": exemplar.filename}
+            if should_log_progress(pdf_index, progress_every_pdfs):
                 logger.info("PDF_METADATA_ONLY_PROGRESS index=%s total=%s url=%s", pdf_index, len(unique_pdf_urls), pdf_url)
-        except Exception as exc:
-            meta.update({"error": str(exc)})
-            errors.append(error_from_exception(phase="pdf", url=pdf_url, source_page_url=exemplar.source_page_url, exc=exc))
-            logger.error("PDF_ERROR index=%s total=%s url=%s source=%s message=%s", pdf_index, len(unique_pdf_urls), pdf_url, exemplar.source_page_url, exc, exc_info=True)
-            if strict:
-                write_workbook(output, pages=pages, pdfs=pdfs, links=links, errors=errors)
-                write_error_report(error_log_file, errors)
-                raise CrawlError(f"PDF handling failed: {pdf_url}: {exc}") from exc
-        pdf_meta[pdf_url] = meta
+
+    if pdf_tasks:
+        logger.info("PDF_PARALLEL_START tasks=%s workers=%s", len(pdf_tasks), max_pdf_workers)
+        completed_pdf_tasks = 0
+        with ThreadPoolExecutor(max_workers=max_pdf_workers, thread_name_prefix="pdf") as executor:
+            futures = [
+                executor.submit(
+                    handle_pdf_task,
+                    pdf_index=int(task["pdf_index"]),
+                    total_pdfs=len(unique_pdf_urls),
+                    pdf_url=str(task["pdf_url"]),
+                    exemplar=task["exemplar"],  # type: ignore[arg-type]
+                    mode=str(task["mode"]),
+                    target=task["target"],  # type: ignore[arg-type]
+                    timeout=timeout,
+                    sleep=sleep,
+                    retries=retries,
+                    log_probe=should_log_progress(int(task["pdf_index"]), progress_every_pdfs),
+                    logger=logger,
+                )
+                for task in pdf_tasks
+            ]
+            for future in as_completed(futures):
+                result = future.result()
+                completed_pdf_tasks += 1
+                pdf_meta[result.pdf_url] = result.meta
+                if result.errors:
+                    errors.extend(result.errors)
+                    if strict:
+                        write_workbook(output, pages=pages, pdfs=pdfs, links=links, errors=errors)
+                        write_error_report(error_log_file, errors)
+                        first_error = result.errors[0]
+                        raise CrawlError(f"PDF handling failed: {first_error.url}: {first_error.message}")
+                if should_log_progress(completed_pdf_tasks, progress_every_pdfs):
+                    logger.info(
+                        "PDF_PARALLEL_PROGRESS completed=%s tasks=%s unique_pdfs=%s errors=%s",
+                        completed_pdf_tasks,
+                        len(pdf_tasks),
+                        len(unique_pdf_urls),
+                        len(errors),
+                    )
+        logger.info("PDF_PARALLEL_DONE tasks=%s errors=%s", len(pdf_tasks), len(errors))
 
     for pdf in pdfs:
         meta = pdf_meta.get(pdf.pdf_url, {})
