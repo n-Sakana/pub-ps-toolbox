@@ -49,6 +49,7 @@ ps-toolbox/
       config.json
       crawler.py
       requirements.txt
+      requirements-graphviz.txt
       scraper/
       tests/
       README.md
@@ -82,7 +83,8 @@ python -m pip install -r requirements.txt
 python crawler.py
 python crawler.py --download-pdfs --max-pdf-downloads 10
 python crawler.py --log-file out/crawl.log --error-log-file out/errors.txt
+python crawler.py --graph-dir out/graphs
 python tests/test_e2e_live.py
 ```
 
-既定ではPDF本体は保存せず、`moj_isa_crawl.xlsx` に Pages / PDFs / Links / Errors / Summary を出します。進捗はCLIに出し、詳細ログは `logs/moj_isa_crawler.log`、エラーログは `logs/moj_isa_errors.txt` に保存します。詳しい使い方は `tools/moj-isa-crawler/README.md` を参照してください。
+既定ではPDF本体は保存せず、`moj_isa_crawl.xlsx` に Pages / PDFs / Links / Errors / Summary / Stats / DepthStats / SectionStats / PdfStats / ErrorStats / TopPages / Graphs を出します。進捗はCLIに出し、詳細ログは `logs/moj_isa_crawler.log`、エラーログは `logs/moj_isa_errors.txt`、図解PNGとGraphviz用DOTは `graphs/` に保存します。Graphvizレンダリングを使う場合は `requirements-graphviz.txt` も入れます。詳しい使い方は `tools/moj-isa-crawler/README.md` を参照してください。

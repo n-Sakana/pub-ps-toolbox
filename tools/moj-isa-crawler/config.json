@@ -17,5 +17,7 @@
   "retries": 2,
   "max_pages": null,
   "max_depth": null,
-  "strict": true
+  "strict": false,
+  "default_graph_dir": "graphs",
+  "generate_graphs_by_default": true
 }

@@ -7,6 +7,7 @@ import dataclasses
 class PageRecord:
     order: int
     depth: int
+    section: str
     url: str
     status_code: int
     content_type: str
@@ -43,6 +44,7 @@ class LinkRecord:
 class PdfRecord:
     source_page_url: str
     source_page_title: str
+    source_section: str
     link_text: str
     pdf_url: str
     filename: str
@@ -55,6 +57,10 @@ class PdfRecord:
     last_modified: str = ""
     bytes_written: int = 0
     sha256: str = ""
+    response_headers_json: str = ""
+    first_bytes_hex: str = ""
+    post_write_size: int = 0
+    post_write_readback_ok: bool = False
     error: str = ""
 
     def as_dict(self) -> dict[str, object]:
@@ -67,6 +73,8 @@ class ErrorRecord:
     url: str
     source_page_url: str
     message: str
+    exception_type: str = ""
+    details: str = ""
 
     def as_dict(self) -> dict[str, object]:
         return dataclasses.asdict(self)

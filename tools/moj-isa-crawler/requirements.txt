@@ -2,3 +2,7 @@ requests
 beautifulsoup4
 pandas
 openpyxl
+networkx
+matplotlib
+seaborn
+numpy

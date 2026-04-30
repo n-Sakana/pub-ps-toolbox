@@ -1,22 +1,26 @@
 from __future__ import annotations
 
 import dataclasses
-import json
+import re
 from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
 
+from .analytics import build_stats_frames
 from .models import ErrorRecord, LinkRecord, PageRecord, PdfRecord
 
 EXCEL_TEXT_LIMIT = 32767
 SAFE_TEXT_LIMIT = 32000
+ILLEGAL_XML_RE = re.compile(r"[\x00-\x08\x0B-\x0C\x0E-\x1F\uD800-\uDFFF]")
 
 
 def excel_safe(value: object) -> object:
-    if isinstance(value, str) and len(value) > SAFE_TEXT_LIMIT:
-        return value[:SAFE_TEXT_LIMIT] + "\n... [truncated for Excel cell limit]"
+    if isinstance(value, str):
+        value = ILLEGAL_XML_RE.sub("", value)
+        if len(value) > SAFE_TEXT_LIMIT:
+            return value[:SAFE_TEXT_LIMIT] + "\n... [truncated for Excel cell limit]"
     return value
 
 
@@ -47,7 +51,15 @@ def summary_frame(*, pages: list[PageRecord], pdfs: list[PdfRecord], links: list
     return pd.DataFrame(summary)
 
 
-def write_workbook(output: Path, *, pages: list[PageRecord], pdfs: list[PdfRecord], links: list[LinkRecord], errors: list[ErrorRecord]) -> None:
+def write_workbook(
+    output: Path,
+    *,
+    pages: list[PageRecord],
+    pdfs: list[PdfRecord],
+    links: list[LinkRecord],
+    errors: list[ErrorRecord],
+    graph_paths: list[Path] | None = None,
+) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     sheets = {
         "Pages": records_to_frame(pages),
@@ -56,6 +68,14 @@ def write_workbook(output: Path, *, pages: list[PageRecord], pdfs: list[PdfRecor
         "Errors": records_to_frame(errors),
         "Summary": summary_frame(pages=pages, pdfs=pdfs, links=links, errors=errors),
     }
+    sheets.update(build_stats_frames(pages=pages, pdfs=pdfs, links=links, errors=errors))
+    if graph_paths is not None:
+        sheets["Graphs"] = pd.DataFrame(
+            [
+                {"graph": path.name, "path": str(path)}
+                for path in graph_paths
+            ]
+        )
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for sheet_name, frame in sheets.items():
             if frame.empty:

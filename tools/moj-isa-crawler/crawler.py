@@ -15,11 +15,13 @@ import datetime as dt
 import json
 import logging
 import sys
+import traceback
 from collections import deque
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from scraper.analytics import write_graphs
 from scraper.exporter import write_workbook
 from scraper.fetcher import DEFAULT_USER_AGENT, Fetcher
 from scraper.models import ErrorRecord, LinkRecord, PageRecord, PdfRecord
@@ -32,6 +34,7 @@ from scraper.parser import (
     page_title,
     parse_html,
     safe_filename_from_url,
+    section_from_url,
     tables_json,
     visible_body_text,
 )
@@ -74,8 +77,10 @@ def load_config(path: Path) -> dict[str, Any]:
         "same_netloc_only",
         "default_output",
         "default_download_dir",
+        "default_graph_dir",
         "default_log_file",
         "default_error_log_file",
+        "generate_graphs_by_default",
         "log_level",
         "progress_every_pages",
         "progress_every_pdfs",
@@ -111,6 +116,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_FILE)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--download-dir", type=Path)
+    parser.add_argument("--graph-dir", type=Path, help="write diagram PNGs to this directory")
     parser.add_argument("--log-file", type=Path, help="write detailed run log to this text file")
     parser.add_argument("--error-log-file", type=Path, help="write error report to this text file")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="CLI/file log verbosity")
@@ -124,6 +130,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--sleep", type=float)
     parser.add_argument("--timeout", type=int)
     parser.add_argument("--retries", type=int)
+    parser.add_argument("--no-graphs", action="store_true", help="skip PNG graph generation")
+    parser.add_argument("--strict", action="store_true", help="fail immediately on page/PDF errors")
     parser.add_argument("--allow-errors", action="store_true", help="write workbook even when some pages/PDFs fail")
     return parser.parse_args(argv)
 
@@ -176,10 +184,50 @@ def write_error_report(path: Path, errors: list[ErrorRecord]) -> None:
                     f"url: {error.url}",
                     f"source_page_url: {error.source_page_url}",
                     f"message: {error.message}",
+                    f"exception_type: {error.exception_type}",
+                    "details:",
+                    error.details or "(none)",
                     "",
                 ]
             )
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def looks_like_html(content_type: str, content: bytes) -> bool:
+    lower_type = content_type.lower()
+    if "html" in lower_type:
+        return True
+    if lower_type and "text/plain" not in lower_type:
+        return False
+    probe = content[:2048].lower()
+    return b"<html" in probe or b"<!doctype html" in probe or b"<head" in probe or b"<body" in probe
+
+
+def error_from_exception(*, phase: str, url: str, source_page_url: str, exc: BaseException) -> ErrorRecord:
+    errno_value = getattr(exc, "errno", None)
+    winerror_value = getattr(exc, "winerror", None)
+    details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    if errno_value is not None or winerror_value is not None:
+        details = f"errno={errno_value} winerror={winerror_value}\n{details}"
+    return ErrorRecord(
+        phase=phase,
+        url=url,
+        source_page_url=source_page_url,
+        message=str(exc),
+        exception_type=type(exc).__name__,
+        details=details,
+    )
+
+
+def error_from_message(*, phase: str, url: str, source_page_url: str, message: str, exception_type: str = "") -> ErrorRecord:
+    return ErrorRecord(
+        phase=phase,
+        url=url,
+        source_page_url=source_page_url,
+        message=message,
+        exception_type=exception_type,
+        details=message,
+    )
 
 
 def make_unique_path(download_dir: Path, filename: str, used: set[Path]) -> Path:
@@ -205,8 +253,10 @@ def crawl(argv: list[str]) -> int:
     same_netloc_only = bool(config["same_netloc_only"])
     output = args.output or Path(str(config["default_output"]))
     download_dir = args.download_dir or Path(str(config["default_download_dir"]))
+    graph_dir = args.graph_dir or Path(str(config["default_graph_dir"]))
     log_file = args.log_file or Path(str(config["default_log_file"]))
     error_log_file = args.error_log_file or Path(str(config["default_error_log_file"]))
+    generate_graphs = bool(config["generate_graphs_by_default"]) and not args.no_graphs
     log_level = args.log_level or str(config["log_level"])
     progress_every_pages = args.progress_every_pages if args.progress_every_pages is not None else int(config["progress_every_pages"])
     progress_every_pdfs = args.progress_every_pdfs if args.progress_every_pdfs is not None else int(config["progress_every_pdfs"])
@@ -217,18 +267,22 @@ def crawl(argv: list[str]) -> int:
     retries = args.retries if args.retries is not None else int(config["retries"])
     max_pages = args.max_pages if args.max_pages is not None else config["max_pages"]
     max_depth = args.max_depth if args.max_depth is not None else config["max_depth"]
-    strict = bool(config["strict"]) and not args.allow_errors
+    if args.strict and args.allow_errors:
+        raise CrawlError("--strict and --allow-errors cannot be used together")
+    strict = args.strict or (bool(config["strict"]) and not args.allow_errors)
 
     logger = setup_logging(log_file=log_file, log_level=log_level)
     logger.info(
         "START start_urls=%s allowed_prefixes=%s output=%s download_pdfs=%s probe_pdfs=%s "
-        "download_dir=%s max_pages=%s max_depth=%s strict=%s log_file=%s error_log_file=%s",
+        "download_dir=%s generate_graphs=%s graph_dir=%s max_pages=%s max_depth=%s strict=%s log_file=%s error_log_file=%s",
         len(start_urls),
         allowed_prefixes,
         output,
         download_pdfs,
         probe_pdfs,
         download_dir,
+        generate_graphs,
+        graph_dir,
         max_pages,
         max_depth,
         strict,
@@ -237,7 +291,7 @@ def crawl(argv: list[str]) -> int:
     )
 
     fetcher = Fetcher(timeout=timeout, sleep=sleep, retries=retries, user_agent=DEFAULT_USER_AGENT)
-    queue: deque[tuple[str, int]] = deque((url, 0) for url in start_urls)
+    queue: deque[tuple[str, int, str]] = deque((url, 0, "") for url in start_urls)
     queued = set(start_urls)
     visited: set[str] = set()
     pages: list[PageRecord] = []
@@ -248,15 +302,29 @@ def crawl(argv: list[str]) -> int:
     while queue:
         if max_pages is not None and len(pages) >= int(max_pages):
             break
-        url, depth = queue.popleft()
+        url, depth, source_page_url = queue.popleft()
         if url in visited:
             continue
         if max_depth is not None and depth > int(max_depth):
             continue
         visited.add(url)
         try:
-            logger.info("PAGE_FETCH_START depth=%s url=%s queue_remaining=%s", depth, url, len(queue))
+            logger.info("PAGE_FETCH_START depth=%s url=%s source=%s queue_remaining=%s", depth, url, source_page_url, len(queue))
             fetched = fetcher.get(url)
+            if fetched.final_url != url:
+                visited.add(fetched.final_url)
+            if not looks_like_html(fetched.content_type, fetched.content):
+                message = (
+                    f"Non-HTML response: status={fetched.status_code} "
+                    f"content_type={fetched.content_type!r} bytes={len(fetched.content)}"
+                )
+                errors.append(error_from_message(phase="page_non_html", url=fetched.final_url, source_page_url=source_page_url, message=message, exception_type="NonHtmlResponse"))
+                logger.warning("PAGE_SKIP_NON_HTML depth=%s status=%s content_type=%s bytes=%s url=%s source=%s", depth, fetched.status_code, fetched.content_type, len(fetched.content), fetched.final_url, source_page_url)
+                if strict:
+                    write_workbook(output, pages=pages, pdfs=pdfs, links=links, errors=errors)
+                    write_error_report(error_log_file, errors)
+                    raise CrawlError(message)
+                continue
             soup = parse_html(fetched.text())
             title = page_title(soup)
             page_links = extract_links(
@@ -271,6 +339,7 @@ def crawl(argv: list[str]) -> int:
             page = PageRecord(
                 order=len(pages) + 1,
                 depth=depth,
+                section=section_from_url(fetched.final_url),
                 url=fetched.final_url,
                 status_code=fetched.status_code,
                 content_type=fetched.content_type,
@@ -317,6 +386,7 @@ def crawl(argv: list[str]) -> int:
                         PdfRecord(
                             source_page_url=fetched.final_url,
                             source_page_title=title,
+                            source_section=section_from_url(fetched.final_url),
                             link_text=link.text,
                             pdf_url=link.url,
                             filename=safe_filename_from_url(link.url),
@@ -325,10 +395,12 @@ def crawl(argv: list[str]) -> int:
                 elif link.category == "internal_page" and link.url not in visited and link.url not in queued:
                     if is_allowed_by_prefix(link.url, allowed_prefixes):
                         queued.add(link.url)
-                        queue.append((link.url, depth + 1))
+                        queue.append((link.url, depth + 1, fetched.final_url))
+        except CrawlError:
+            raise
         except Exception as exc:
-            errors.append(ErrorRecord(phase="page", url=url, source_page_url="", message=str(exc)))
-            logger.error("PAGE_ERROR url=%s message=%s", url, exc)
+            errors.append(error_from_exception(phase="page", url=url, source_page_url=source_page_url, exc=exc))
+            logger.error("PAGE_ERROR url=%s source=%s message=%s", url, source_page_url, exc, exc_info=True)
             if strict:
                 write_workbook(output, pages=pages, pdfs=pdfs, links=links, errors=errors)
                 write_error_report(error_log_file, errors)
@@ -369,7 +441,41 @@ def crawl(argv: list[str]) -> int:
                             target,
                         )
 
-                result = fetcher.download(pdf_url, target, progress_callback=log_download_progress)
+                def log_download_event(event: str, data: dict[str, object]) -> None:
+                    if event == "response":
+                        logger.info(
+                            "PDF_RESPONSE index=%s total=%s status=%s content_type=%s content_length=%s final_url=%s headers=%s",
+                            pdf_index,
+                            len(unique_pdf_urls),
+                            data.get("status_code"),
+                            data.get("content_type"),
+                            data.get("content_length"),
+                            data.get("final_url"),
+                            data.get("headers"),
+                        )
+                    elif event == "part_verify":
+                        logger.info(
+                            "PDF_PART_VERIFY index=%s total=%s bytes_written=%s part_size=%s first_bytes_hex=%s readback_hex=%s part=%s",
+                            pdf_index,
+                            len(unique_pdf_urls),
+                            data.get("bytes_written"),
+                            data.get("part_size"),
+                            data.get("first_bytes_hex"),
+                            data.get("readback_hex"),
+                            data.get("part_path"),
+                        )
+                    elif event == "final_verify":
+                        logger.info(
+                            "PDF_FINAL_VERIFY index=%s total=%s post_write_size=%s readback_hex=%s readback_ok=%s saved=%s",
+                            pdf_index,
+                            len(unique_pdf_urls),
+                            data.get("post_write_size"),
+                            data.get("readback_hex"),
+                            data.get("readback_ok"),
+                            data.get("saved_path"),
+                        )
+
+                result = fetcher.download(pdf_url, target, progress_callback=log_download_progress, event_callback=log_download_event)
                 downloaded_count += 1
                 meta.update(
                     {
@@ -382,6 +488,10 @@ def crawl(argv: list[str]) -> int:
                         "last_modified": result.last_modified,
                         "bytes_written": result.bytes_written,
                         "sha256": result.sha256,
+                        "response_headers_json": result.response_headers_json,
+                        "first_bytes_hex": result.first_bytes_hex,
+                        "post_write_size": result.post_write_size,
+                        "post_write_readback_ok": result.post_write_readback_ok,
                     }
                 )
                 logger.info(
@@ -429,8 +539,8 @@ def crawl(argv: list[str]) -> int:
                 logger.info("PDF_METADATA_ONLY_PROGRESS index=%s total=%s url=%s", pdf_index, len(unique_pdf_urls), pdf_url)
         except Exception as exc:
             meta.update({"error": str(exc)})
-            errors.append(ErrorRecord(phase="pdf", url=pdf_url, source_page_url=exemplar.source_page_url, message=str(exc)))
-            logger.error("PDF_ERROR index=%s total=%s url=%s source=%s message=%s", pdf_index, len(unique_pdf_urls), pdf_url, exemplar.source_page_url, exc)
+            errors.append(error_from_exception(phase="pdf", url=pdf_url, source_page_url=exemplar.source_page_url, exc=exc))
+            logger.error("PDF_ERROR index=%s total=%s url=%s source=%s message=%s", pdf_index, len(unique_pdf_urls), pdf_url, exemplar.source_page_url, exc, exc_info=True)
             if strict:
                 write_workbook(output, pages=pages, pdfs=pdfs, links=links, errors=errors)
                 write_error_report(error_log_file, errors)
@@ -442,15 +552,32 @@ def crawl(argv: list[str]) -> int:
         for key, value in meta.items():
             setattr(pdf, key, value)
 
-    write_workbook(output, pages=pages, pdfs=pdfs, links=links, errors=errors)
+    graph_paths: list[Path] = []
+    if generate_graphs:
+        try:
+            logger.info("GRAPH_PHASE_START graph_dir=%s pages=%s links=%s pdf_refs=%s", graph_dir, len(pages), len(links), len(pdfs))
+            graph_paths = write_graphs(graph_dir, pages=pages, pdfs=pdfs, links=links, errors=errors)
+            for graph_path in graph_paths:
+                logger.info("GRAPH_OK path=%s", graph_path)
+            logger.info("GRAPH_PHASE_DONE generated=%s graph_dir=%s", len(graph_paths), graph_dir)
+        except Exception as exc:
+            errors.append(error_from_exception(phase="graph", url=str(graph_dir), source_page_url="", exc=exc))
+            logger.error("GRAPH_ERROR graph_dir=%s message=%s", graph_dir, exc, exc_info=True)
+            if strict:
+                write_workbook(output, pages=pages, pdfs=pdfs, links=links, errors=errors, graph_paths=graph_paths)
+                write_error_report(error_log_file, errors)
+                raise CrawlError(f"Graph generation failed: {exc}") from exc
+
+    write_workbook(output, pages=pages, pdfs=pdfs, links=links, errors=errors, graph_paths=graph_paths)
     write_error_report(error_log_file, errors)
     downloaded_unique = {p.pdf_url for p in pdfs if p.downloaded}
     logger.info(
-        "DONE pages=%s pdf_refs=%s unique_pdfs=%s downloaded_unique_pdfs=%s errors=%s output=%s log_file=%s error_log_file=%s",
+        "DONE pages=%s pdf_refs=%s unique_pdfs=%s downloaded_unique_pdfs=%s graphs=%s errors=%s output=%s log_file=%s error_log_file=%s",
         len(pages),
         len(pdfs),
         len({p.pdf_url for p in pdfs}),
         len(downloaded_unique),
+        len(graph_paths),
         len(errors),
         output,
         log_file,

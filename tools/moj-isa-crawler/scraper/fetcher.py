@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
+import os
 import time
 from pathlib import Path
 from typing import Callable
@@ -42,6 +44,10 @@ class DownloadResult:
     sha256: str
     saved_path: Path
     bytes_written: int
+    response_headers_json: str
+    first_bytes_hex: str
+    post_write_size: int
+    post_write_readback_ok: bool
 
 
 class FetchError(RuntimeError):
@@ -101,23 +107,87 @@ class Fetcher:
             content=b"",
         )
 
-    def download(self, url: str, target: Path, *, progress_callback: Callable[[int], None] | None = None) -> DownloadResult:
+    def download(
+        self,
+        url: str,
+        target: Path,
+        *,
+        progress_callback: Callable[[int], None] | None = None,
+        event_callback: Callable[[str, dict[str, object]], None] | None = None,
+    ) -> DownloadResult:
         target.parent.mkdir(parents=True, exist_ok=True)
         response = self._request("GET", url, stream=True)
+        response_headers = dict(response.headers)
+        response_headers_json = json.dumps(response_headers, ensure_ascii=False, sort_keys=True)
+        if event_callback is not None:
+            event_callback(
+                "response",
+                {
+                    "status_code": response.status_code,
+                    "final_url": response.url,
+                    "content_type": response.headers.get("Content-Type", ""),
+                    "content_length": response.headers.get("Content-Length", ""),
+                    "headers": response_headers_json,
+                },
+            )
         digest = hashlib.sha256()
         bytes_written = 0
         first_bytes = b""
-        with target.open("wb") as fh:
-            for chunk in response.iter_content(chunk_size=1024 * 128):
-                if not chunk:
-                    continue
-                if len(first_bytes) < 5:
-                    first_bytes = (first_bytes + chunk)[:5]
-                fh.write(chunk)
-                digest.update(chunk)
-                bytes_written += len(chunk)
-                if progress_callback is not None:
-                    progress_callback(bytes_written)
+        part_target = target.with_name(f"{target.name}.part")
+        try:
+            target.unlink(missing_ok=True)
+            part_target.unlink(missing_ok=True)
+            with part_target.open("wb") as fh:
+                for chunk in response.iter_content(chunk_size=1024 * 128):
+                    if not chunk:
+                        continue
+                    if len(first_bytes) < 5:
+                        first_bytes = (first_bytes + chunk)[:5]
+                    fh.write(chunk)
+                    digest.update(chunk)
+                    bytes_written += len(chunk)
+                    if progress_callback is not None:
+                        progress_callback(bytes_written)
+                fh.flush()
+                os.fsync(fh.fileno())
+            part_size = part_target.stat().st_size
+            with part_target.open("rb") as verify_fh:
+                part_readback = verify_fh.read(5)
+            if event_callback is not None:
+                event_callback(
+                    "part_verify",
+                    {
+                        "part_path": str(part_target),
+                        "bytes_written": bytes_written,
+                        "part_size": part_size,
+                        "first_bytes_hex": first_bytes.hex(),
+                        "readback_hex": part_readback.hex(),
+                    },
+                )
+            part_target.replace(target)
+            post_write_size = target.stat().st_size
+            with target.open("rb") as verify_fh:
+                final_readback = verify_fh.read(5)
+            post_write_readback_ok = final_readback == first_bytes[:5]
+            if event_callback is not None:
+                event_callback(
+                    "final_verify",
+                    {
+                        "saved_path": str(target),
+                        "post_write_size": post_write_size,
+                        "readback_hex": final_readback.hex(),
+                        "readback_ok": post_write_readback_ok,
+                    },
+                )
+        except OSError as exc:
+            target.unlink(missing_ok=True)
+            part_target.unlink(missing_ok=True)
+            errno_value = getattr(exc, "errno", None)
+            winerror_value = getattr(exc, "winerror", None)
+            raise FetchError(
+                f"filesystem write failed: target={target} part={part_target} "
+                f"errno={errno_value} winerror={winerror_value} message={exc}"
+            ) from exc
         if bytes_written == 0:
             target.unlink(missing_ok=True)
             raise FetchError(f"GET {url} downloaded 0 bytes")
@@ -125,6 +195,12 @@ class Fetcher:
         if first_bytes and not first_bytes.startswith(b"%PDF-") and "pdf" not in content_type.lower():
             target.unlink(missing_ok=True)
             raise FetchError(f"GET {url} did not return a PDF: Content-Type={content_type!r}, first_bytes={first_bytes!r}")
+        if post_write_size != bytes_written:
+            target.unlink(missing_ok=True)
+            raise FetchError(f"GET {url} write size mismatch: bytes_written={bytes_written}, post_write_size={post_write_size}")
+        if not post_write_readback_ok:
+            target.unlink(missing_ok=True)
+            raise FetchError(f"GET {url} readback mismatch after save: first_bytes={first_bytes!r}")
         return DownloadResult(
             url=url,
             final_url=response.url,
@@ -135,4 +211,8 @@ class Fetcher:
             sha256=digest.hexdigest(),
             saved_path=target,
             bytes_written=bytes_written,
+            response_headers_json=response_headers_json,
+            first_bytes_hex=first_bytes.hex(),
+            post_write_size=post_write_size,
+            post_write_readback_ok=post_write_readback_ok,
         )

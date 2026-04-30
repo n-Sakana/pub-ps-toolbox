@@ -62,6 +62,7 @@ def main() -> int:
         tmp = Path(tmpdir)
         output = tmp / "moj_isa_crawl.xlsx"
         download_dir = tmp / "pdfs"
+        graph_dir = tmp / "graphs"
         log_file = tmp / "crawler.log"
         error_log_file = tmp / "errors.txt"
         cmd = [
@@ -75,6 +76,8 @@ def main() -> int:
             str(output),
             "--download-dir",
             str(download_dir),
+            "--graph-dir",
+            str(graph_dir),
             "--log-file",
             str(log_file),
             "--error-log-file",
@@ -104,16 +107,25 @@ def main() -> int:
         if not error_log_file.exists() or error_log_file.stat().st_size == 0:
             raise AssertionError("Error log was not created")
         log_text = log_file.read_text(encoding="utf-8")
-        if "PAGE_PROGRESS" not in log_text or "PDF_DOWNLOAD_OK" not in log_text or "DONE" not in log_text:
+        if "PAGE_PROGRESS" not in log_text or "PDF_DOWNLOAD_OK" not in log_text or "PDF_FINAL_VERIFY" not in log_text or "GRAPH_PHASE_DONE" not in log_text or "DONE" not in log_text:
             raise AssertionError("Run log does not contain expected progress markers")
         error_text = error_log_file.read_text(encoding="utf-8")
         if "errors: 0" not in error_text or "No errors." not in error_text:
             raise AssertionError("Empty error report was not written")
 
         workbook = load_workbook(output, read_only=True, data_only=True)
-        for sheet in ["Pages", "PDFs", "Links", "Errors", "Summary"]:
+        for sheet in ["Pages", "PDFs", "Links", "Errors", "Summary", "Stats", "DepthStats", "SectionStats", "PdfStats", "ErrorStats", "TopPages", "Graphs"]:
             if sheet not in workbook.sheetnames:
                 raise AssertionError(f"Missing sheet: {sheet}")
+        graph_files = sorted(graph_dir.glob("*.png"))
+        if len(graph_files) < 3:
+            raise AssertionError(f"Expected graph PNGs, got {len(graph_files)} in {graph_dir}")
+        dot_files = sorted(graph_dir.glob("*.dot"))
+        if len(dot_files) < 2:
+            raise AssertionError(f"Expected Graphviz DOT files, got {len(dot_files)} in {graph_dir}")
+        status_file = graph_dir / "graphviz_status.txt"
+        if not status_file.exists() or "Graphviz status" not in status_file.read_text(encoding="utf-8"):
+            raise AssertionError("Graphviz status file was not written")
 
         pages = sheet_records(workbook, "Pages")
         pdfs = sheet_records(workbook, "PDFs")
@@ -158,8 +170,12 @@ def main() -> int:
             raise AssertionError(f"Downloaded PDF missing or empty: {downloaded_path}")
         if len(sha) != 64:
             raise AssertionError(f"Invalid sha256: {sha}")
+        if normalize_space(downloaded[0].get("first_bytes_hex", "")) != "255044462d":
+            raise AssertionError("Downloaded PDF first bytes were not recorded as %PDF-")
+        if str(downloaded[0].get("post_write_readback_ok", "")).lower() != "true":
+            raise AssertionError("Downloaded PDF post-write readback check did not pass")
 
-        print(f"E2E OK: pages={len(pages)}, pdf_refs={len(pdfs)}, downloaded={downloaded_path.name}, log={log_file.name}, errors={error_log_file.name}")
+        print(f"E2E OK: pages={len(pages)}, pdf_refs={len(pdfs)}, downloaded={downloaded_path.name}, graphs={len(graph_files)}, dot={len(dot_files)}, log={log_file.name}, errors={error_log_file.name}")
         return 0
 
 

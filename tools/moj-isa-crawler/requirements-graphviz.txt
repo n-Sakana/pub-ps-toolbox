@@ -1,0 +1,4 @@
+# Optional: Graphviz-based DOT rendering.
+# If pygraphviz fails to install, install the Graphviz system package first.
+graphviz
+pygraphviz

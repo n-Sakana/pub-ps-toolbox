@@ -160,7 +160,11 @@ def has_resource_extension(url: str) -> bool:
 
 
 def normalize_url(base_url: str, href: str) -> str:
-    absolute = urljoin(base_url, href.strip())
+    # Some pages contain a full-width hash mark "＃". urllib does not treat it
+    # as a fragment delimiter, so it becomes a bogus URL path and can stop a
+    # strict crawl. Normalize it before urljoin/defrag.
+    normalized_href = href.strip().replace("＃", "#")
+    absolute = urljoin(base_url, normalized_href).replace("＃", "#")
     absolute, _fragment = urldefrag(absolute)
     return absolute
 
@@ -206,9 +210,11 @@ def extract_links(
     seen: set[tuple[str, str]] = set()
     for a in root.find_all("a", href=True):
         href = a.get("href", "").strip()
-        if not href or href.startswith("#"):
+        if not href or href.startswith("#") or href.startswith("＃"):
             continue
         url = normalize_url(base_url, href)
+        if url == base_url:
+            continue
         text = normalize_space(a.get_text(" ", strip=True))
         category = classify_url(url, start_netloc=start_netloc, allowed_prefixes=allowed_prefixes, same_netloc_only=same_netloc_only)
         key = (url, text)
@@ -226,3 +232,12 @@ def safe_filename_from_url(url: str) -> str:
     if not name.lower().endswith(".pdf"):
         name += ".pdf"
     return name
+
+
+def section_from_url(url: str) -> str:
+    parts = [part for part in urlparse(url).path.split("/") if part]
+    if not parts:
+        return "(root)"
+    if parts[0] == "isa":
+        return parts[1] if len(parts) > 1 else "(isa-root)"
+    return parts[0]
