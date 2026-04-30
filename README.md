@@ -37,3 +37,16 @@ ps-toolbox/
       tool.json
       run.ps1
 ```
+
+## MOJ ISA FAQ Excel Scraper
+
+法務省 出入国在留管理庁 FAQ インデックス配下の8ページからQ&Aを取得し、Excelに出力するPython CLIです。
+
+```bash
+cd tools/moj-isa-faq
+python -m pip install -r requirements.txt
+python qa_scraper.py
+python test_e2e.py
+```
+
+`URL.txt` にFAQインデックスURLを1行で置き、`qa_scraper.py` が配下8ページを自動検出します。既定の出力ファイルは `moj_isa_faq.xlsx` です。

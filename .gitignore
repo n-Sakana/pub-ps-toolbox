@@ -1,3 +1,6 @@
-﻿tmp/
+tmp/
+__pycache__/
+*.py[cod]
 tools/print/print.log
 tools/print/PRINT_DEBUG_LOG.md
+tools/moj-isa-faq/*.xlsx
