@@ -6,6 +6,7 @@ PowerShell toolbox host for Explorer context-menu tools.
 
 - `Print`: print PDF / Word / Excel with a timestamp header
 - `Rename`: preview and rename selected files or folders
+- `MOJ ISA FAQ Excel Scraper`: scrape ISA/MOJ FAQ pages and export Q&A to Excel
 
 ## How It Works
 
@@ -36,6 +37,12 @@ ps-toolbox/
     rename/
       tool.json
       run.ps1
+    moj-isa-faq/
+      URL.txt
+      qa_scraper.py
+      requirements.txt
+      test_e2e.py
+      README.md
 ```
 
 ## MOJ ISA FAQ Excel Scraper
@@ -44,9 +51,12 @@ ps-toolbox/
 
 ```bash
 cd tools/moj-isa-faq
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install -r requirements.txt
 python qa_scraper.py
 python test_e2e.py
 ```
 
 `URL.txt` にFAQインデックスURLを1行で置き、`qa_scraper.py` が配下8ページを自動検出します。既定の出力ファイルは `moj_isa_faq.xlsx` です。
+詳しい使い方は `tools/moj-isa-faq/README.md` を参照してください。

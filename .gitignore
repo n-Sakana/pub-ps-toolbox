@@ -1,5 +1,6 @@
 tmp/
 __pycache__/
+.venv/
 *.py[cod]
 tools/print/print.log
 tools/print/PRINT_DEBUG_LOG.md
