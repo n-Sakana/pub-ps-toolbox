@@ -44,6 +44,29 @@ python crawler.py --download-pdfs
 
 保存先は既定で `downloads/pdfs/` です。
 
+## URL・ページ名・本文・リンクだけを出す別版
+
+全ページを同じ範囲で走査し、次の4列だけを出す場合は `crawler_flat.py` を使います。
+
+- `URL`
+- `ページ名`
+- `ページ本文`
+- `含まれるリンク`
+
+```bash
+python crawler_flat.py
+```
+
+既定の出力は `moj_isa_pages_text_links.csv` です。`含まれるリンク` は、そのページ内で抽出したリンクURLを `;` 区切りで入れます。内部ページ、PDF、外部URL、その他スキームを同じ列にまとめ、同一ページ内の同一URLは1回に寄せます。
+
+Excelで欲しい場合は拡張子を `.xlsx` にします。
+
+```bash
+python crawler_flat.py --output out/moj_isa_pages_text_links.xlsx
+```
+
+CSVは本文をそのまま残します。Excelはセル上限があるため、長すぎる本文やリンク列はセル内で切り詰めます。熱湯を入れすぎるとカップから溢れる、あれです。
+
 ## よく使うオプション
 
 ```bash
@@ -176,6 +199,7 @@ moj-isa-crawler/
   URL.txt
   config.json
   crawler.py
+  crawler_flat.py
   requirements.txt
   requirements-graphviz.txt
   README.md
